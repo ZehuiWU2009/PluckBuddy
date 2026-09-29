@@ -1,0 +1,318 @@
+//
+//  WaveSettingsSheet.swift
+//  PluckBuddy
+//
+//  Created on 2026/8/31.
+//
+
+import SwiftUI
+
+struct WaveSettingsSheet: View {
+    @Environment(\.dismiss) private var dismiss
+    
+    @Binding var targetBPM: Double
+    @Binding var targetDuration: TimeInterval
+    @Binding var metronomeEnabled: Bool
+    @Binding var metronomeSoundType: MetronomeSoundType
+    
+    var body: some View {
+        NavigationStack {
+            Form {
+                // MARK: - 目标设置
+                Section {
+                    // 目标速度（BPM）- 扫弦通常较慢
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Text("目标速度")
+                                .font(.headline)
+                            Spacer()
+                            Text("\(Int(targetBPM)) BPM")
+                                .font(.title3)
+                                .fontWeight(.semibold)
+                                .foregroundStyle(.cyan)
+                        }
+                        
+                        Slider(value: $targetBPM, in: 36...220, step: 1)
+                            .tint(.cyan)
+                        
+                        HStack {
+                            Text("36")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                            Spacer()
+                            Text("220")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        
+                        // 速度建议
+                        HStack(spacing: 4) {
+                            Image(systemName: "lightbulb.fill")
+                                .font(.caption)
+                                .foregroundStyle(.yellow)
+                            Text(speedSuggestion)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        .padding(.top, 4)
+                    }
+                    .padding(.vertical, 4)
+                    
+                    // 目标时长
+                    VStack(alignment: .leading, spacing: 8) {
+                        HStack {
+                            Text("目标时长")
+                                .font(.headline)
+                            Spacer()
+                            if targetDuration > 0 {
+                                Text(durationText)
+                                    .font(.title3)
+                                    .fontWeight(.semibold)
+                                    .foregroundStyle(.green)
+                            } else {
+                                Text("不限")
+                                    .font(.title3)
+                                    .fontWeight(.semibold)
+                                    .foregroundStyle(.secondary)
+                            }
+                        }
+                        
+                        Picker("时长", selection: $targetDuration) {
+                            Text("不限").tag(TimeInterval(0))
+                            Text("1 分钟").tag(TimeInterval(60))
+                            Text("3 分钟").tag(TimeInterval(180))
+                            Text("5 分钟").tag(TimeInterval(300))
+                            Text("10 分钟").tag(TimeInterval(600))
+                            Text("15 分钟").tag(TimeInterval(900))
+                            Text("20 分钟").tag(TimeInterval(1200))
+                            Text("30 分钟").tag(TimeInterval(1800))
+                        }
+                        .pickerStyle(.segmented)
+                    }
+                    .padding(.vertical, 4)
+                    
+                } header: {
+                    Label("练习目标", systemImage: "target")
+                } footer: {
+                    Text("设置您的扫弦练习目标速度和时长")
+                }
+                
+                // MARK: - 节拍器设置
+                Section {
+                    // 节拍器开关
+                    Toggle(isOn: $metronomeEnabled) {
+                        HStack {
+                            Image(systemName: "metronome")
+                                .foregroundStyle(.orange)
+                            Text("启用节拍器")
+                                .font(.headline)
+                        }
+                    }
+                    .tint(.orange)
+                    
+                    // 节拍器音色（仅在启用时显示）
+                    if metronomeEnabled {
+                        VStack(alignment: .leading, spacing: 12) {
+                            Text("节拍器音色")
+                                .font(.headline)
+                            
+                            Picker("音色", selection: $metronomeSoundType) {
+                                ForEach(MetronomeSoundType.allCases) { type in
+                                    HStack {
+                                        Image(systemName: type.icon)
+                                        Text(type.rawValue)
+                                    }
+                                    .tag(type)
+                                }
+                            }
+                            .pickerStyle(.segmented)
+                        }
+                        .padding(.vertical, 4)
+                        .transition(.opacity.combined(with: .move(edge: .top)))
+                    }
+                    
+                } header: {
+                    Label("节拍器", systemImage: "speaker.wave.2")
+                } footer: {
+                    if metronomeEnabled {
+                        Text("节拍器将以您设定的目标速度播放，帮助您保持稳定的扫弦节奏")
+                    } else {
+                        Text("开启节拍器以获得节奏辅助")
+                    }
+                }
+                
+                // MARK: - 技巧提示
+                Section {
+                    VStack(alignment: .leading, spacing: 12) {
+                        TipRow(
+                            icon: "arrow.up.arrow.down",
+                            title: "练习两个方向",
+                            description: "向上扫和向下扫都要练习，保持方向平衡"
+                        )
+                        
+                        Divider()
+                        
+                        TipRow(
+                            icon: "bolt.fill",
+                            title: "控制力度",
+                            description: "尝试保持稳定的扫弦力度，避免忽强忽弱"
+                        )
+                        
+                        Divider()
+                        
+                        TipRow(
+                            icon: "waveform.path",
+                            title: "节奏稳定",
+                            description: "跟随节拍器练习，逐步提高速度"
+                        )
+                    }
+                } header: {
+                    Label("练习技巧", systemImage: "star.fill")
+                }
+                
+                // MARK: - 说明
+                Section {
+                    VStack(alignment: .leading, spacing: 12) {
+                        InfoRow(
+                            icon: "waveform",
+                            title: "扫弦检测",
+                            description: "自动识别向上和向下的扫弦动作"
+                        )
+                        
+                        Divider()
+                        
+                        InfoRow(
+                            icon: "drop.fill",
+                            title: "水波效果",
+                            description: "根据扫弦力度生成不同大小的水波"
+                        )
+                        
+                        Divider()
+                        
+                        InfoRow(
+                            icon: "star.fill",
+                            title: "得分系统",
+                            description: "根据力度和方向平衡获得分数"
+                        )
+                    }
+                } header: {
+                    Label("功能说明", systemImage: "info.circle")
+                }
+            }
+            .navigationTitle("练习设置")
+            .navigationBarTitleDisplayMode(.inline)
+            .toolbar {
+                ToolbarItem(placement: .confirmationAction) {
+                    Button("完成") {
+                        dismiss()
+                    }
+                    .fontWeight(.semibold)
+                }
+            }
+        }
+        .presentationDetents([.medium, .large])
+        .presentationDragIndicator(.visible)
+    }
+    
+    // MARK: - Helper Properties
+    
+    private var durationText: String {
+        let minutes = Int(targetDuration / 60)
+        if minutes < 60 {
+            return "\(minutes) 分钟"
+        } else {
+            let hours = minutes / 60
+            let remainingMinutes = minutes % 60
+            if remainingMinutes == 0 {
+                return "\(hours) 小时"
+            } else {
+                return "\(hours) 小时 \(remainingMinutes) 分钟"
+            }
+        }
+    }
+    
+    private var speedSuggestion: String {
+        let bpm = Int(targetBPM)
+        switch bpm {
+        case 0..<50:
+            return "极慢 - 适合初学者基础练习"
+        case 50..<70:
+            return "慢速 - 适合稳定性练习"
+        case 70..<90:
+            return "中慢速 - 适合基础扫弦"
+        case 90..<110:
+            return "中速 - 适合日常练习"
+        case 110..<140:
+            return "中快速 - 适合进阶练习"
+        case 140..<170:
+            return "快速 - 适合高级练习"
+        default:
+            return "极快 - 适合专业级练习"
+        }
+    }
+}
+
+// MARK: - Info Row Component
+
+private struct InfoRow: View {
+    let icon: String
+    let title: String
+    let description: String
+    
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: icon)
+                .font(.title3)
+                .foregroundStyle(.cyan)
+                .frame(width: 30)
+            
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(.subheadline)
+                    .fontWeight(.semibold)
+                
+                Text(description)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+}
+
+// MARK: - Tip Row Component
+
+private struct TipRow: View {
+    let icon: String
+    let title: String
+    let description: String
+    
+    var body: some View {
+        HStack(alignment: .top, spacing: 12) {
+            Image(systemName: icon)
+                .font(.title3)
+                .foregroundStyle(.orange)
+                .frame(width: 30)
+            
+            VStack(alignment: .leading, spacing: 4) {
+                Text(title)
+                    .font(.subheadline)
+                    .fontWeight(.semibold)
+                
+                Text(description)
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+        }
+    }
+}
+
+// MARK: - Preview
+
+#Preview {
+    WaveSettingsSheet(
+        targetBPM: .constant(60),
+        targetDuration: .constant(300),
+        metronomeEnabled: .constant(true),
+        metronomeSoundType: .constant(.tick)
+    )
+}
