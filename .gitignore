@@ -1,0 +1,28 @@
+# Xcode user state / workspace data
+.DS_Store
+**/.DS_Store
+xcuserdata/
+**/xcuserdata/
+*.xcuserstate
+**/*.xcuserstate
+*.xcworkspacedata
+*.pbxuser
+*.mode1v3
+*.mode2v3
+*.perspectivev3
+# Build artifacts
+DerivedData/
+build/
+*.hmap
+*.ipa
+*.xcarchive
+*.dSYM
+*.dSYM.zip
+# Swift Package Manager
+.build/
+.swiftpm/
+# CocoaPods
+Pods/
+# Misc
+*.swp
+*~

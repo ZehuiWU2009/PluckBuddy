@@ -1,0 +1,1283 @@
+//
+//  TechniqueCoachViewModel.swift
+//  PluckBuddy
+//
+//  Created by 吴泽荟 on 2026/7/29.
+//
+
+import Foundation
+import SwiftUI
+import AVFoundation
+import Vision
+import Combine
+import CoreML
+
+@MainActor
+class TechniqueCoachViewModel: ObservableObject {
+    
+    // MARK: - Published Properties
+    
+    /// 是否正在分析
+    @Published var isAnalyzing = false
+    
+    /// 检测到的技法类型
+    @Published var detectedTechnique: TechniqueType = .unknown
+    
+    /// 当前手部姿势数据
+    @Published var handPose: HandPoseData?
+    
+    /// 姿势评估结果
+    @Published var currentEvaluation: PostureEvaluation?
+    
+    /// 状态消息
+    @Published var statusMessage = "准备开始"
+    
+    /// 摄像头权限状态
+    @Published var cameraPermissionGranted = false
+    
+    /// Core ML 声音分类给出的当前声音类别（中文，便于直接展示）
+    @Published var soundSceneLabel = "未开始"
+    
+    /// Core ML 判定当前声音属于琵琶的概率（0~1，最近三次平滑）
+    @Published var pipaConfidence: Double = 0
+    
+    /// 当前听到的是否为琵琶声
+    @Published var isPipaSoundDetected = false
+    
+    /// 分析会话时长
+    @Published var sessionDuration: TimeInterval = 0
+    
+    /// 手部骨骼覆盖图像（用于显示在视频上）
+    @Published var skeletonOverlayImage: UIImage?
+    
+    // MARK: - Internal Properties
+    
+    /// 视频捕获管理器（供 View 访问预览图层）
+    var videoCapture: VideoCaptureManager?
+    
+    // MARK: - Private Properties
+    
+    private var handPoseAnalyzer = HandPoseAnalyzer()
+    private var motionFeatureExtractor = MotionFeatureExtractor()
+    private var techniqueClassifier = TechniqueClassifier()
+    
+    private var rollEvaluator = RollPostureEvaluator()
+    private var sweepEvaluator = SweepPostureEvaluator()
+    private var pluckEvaluator = PluckPostureEvaluator()
+    
+    /// Core ML 声音分类引擎（加载 PipaSoundClassifier）
+    private let soundClassifier = PipaSoundClassifierEngine()
+    
+    /// 声音分类是否已产出过结果——没结果前不做门控，避免开局就把画面判死
+    private var hasSoundResult = false
+    
+    // MARK: - 技法去抖
+    /// 分类器在中间帧会抖动（同一段演奏在「轮指/扫弦/未识别」之间跳），
+    /// 直接把每帧结果抛给界面会导致核心要求面板不停切换。
+    /// 这里要求连续若干帧判定一致才认定为有效技法。
+    private var pendingTechnique: TechniqueType = .unknown
+    private var pendingTechniqueFrames = 0
+    private let techniqueStableFrames = 6   // 约 0.2 秒（按 30 fps 计）
+    
+    private var startTime: Date?
+    private var durationTimer: Timer?
+    
+    // MARK: - Initialization
+    
+    init() {
+        print("🎥 智能指法教练初始化")
+    }
+    
+    // MARK: - Lifecycle
+    
+    /// 开始视频分析
+    func startAnalysis() async {
+        print("🎥 开始视频分析...")
+        
+        // 1. 请求摄像头权限
+        let authorized = await requestCameraPermission()
+        guard authorized else {
+            print("❌ 摄像头权限被拒绝")
+            statusMessage = "需要摄像头权限"
+            return
+        }
+        
+        cameraPermissionGranted = true
+        print("✅ 摄像头权限已授予")
+        
+        // 2. 初始化视频捕获
+        videoCapture = VideoCaptureManager()
+        
+        videoCapture?.onFrameCaptured = { [weak self] pixelBuffer in
+            Task { @MainActor in
+                await self?.processFrame(pixelBuffer)
+            }
+        }
+        
+        // 3. 启动捕获
+        do {
+            try videoCapture?.startCapture()
+            
+            isAnalyzing = true
+            startTime = Date()
+            statusMessage = "请开始弹奏"
+            
+            // 启动时长计时器
+            startDurationTimer()
+            
+            print("✅ 视频捕获已启动")
+            
+            // 🧪 临时测试代码：模拟技法识别
+            // startSimulatedDetection()  // ⚠️ 已禁用模拟数据，等待真实算法实现
+            
+            // 4. 启动 Core ML 声音分类，与视觉通道交叉验证
+            await startSoundClassification()
+            
+        } catch {
+            print("❌ 启动捕获失败: \(error.localizedDescription)")
+            statusMessage = "摄像头启动失败"
+        }
+    }
+    
+    /// 停止视频分析
+    func stopAnalysis() {
+        print("⏹️ 停止视频分析")
+        
+        videoCapture?.stopCapture()
+        isAnalyzing = false
+        
+        // 停止声音分类
+        soundClassifier.stop()
+        hasSoundResult = false
+        soundSceneLabel = "已停止"
+        
+        // 停止计时器
+        stopDurationTimer()
+        
+        if let start = startTime {
+            sessionDuration = Date().timeIntervalSince(start)
+            print("   - 分析时长: \(String(format: "%.1f", sessionDuration))秒")
+        }
+        
+        // 重置状态
+        detectedTechnique = .unknown
+        handPose = nil
+        currentEvaluation = nil
+        statusMessage = "分析已停止"
+        
+        // 重置技法去抖计数，下次开始时重新累积
+        pendingTechnique = .unknown
+        pendingTechniqueFrames = 0
+    }
+    
+    // MARK: - Frame Processing
+    
+    /// 处理每一帧视频
+    private func processFrame(_ pixelBuffer: CVPixelBuffer) async {
+        // 1. 检测手部姿势
+        guard let pose = await handPoseAnalyzer.analyzeHand(in: pixelBuffer) else {
+            // 未检测到手部
+            if detectedTechnique != .unknown {
+                // 如果之前检测到技法，现在丢失了
+                print("⚠️ 手部检测丢失")
+            }
+            statusMessage = "未检测到手部"
+            skeletonOverlayImage = nil  // 清空骨骼图像
+            return
+        }
+        
+        handPose = pose
+        
+        // ✨ 生成手部骨骼覆盖图像
+        generateSkeletonOverlay(from: pose, pixelBuffer: pixelBuffer)
+        
+        // 2. 提取运动特征
+        let features = motionFeatureExtractor.extractFeatures(from: pose)
+        
+        // 3. 分类技法
+        let technique = techniqueClassifier.classify(features: features)
+        
+        // 3.5 音频侧门控：Core ML 声音分类确认当前确实是琵琶声，才把视觉判定落为技法
+        // 手上动作像弹琴、但听感不是琵琶（例如说话、其它乐器、环境噪声）时不给评分
+        if hasSoundResult, !isPipaSoundDetected {
+            if detectedTechnique != .unknown {
+                print("🔇 声音分类判定为「\(soundSceneLabel)」，暂不给出技法评分")
+                detectedTechnique = .unknown
+            }
+            currentEvaluation = nil
+            statusMessage = "未听到琵琶声（\(soundSceneLabel)）"
+            return
+        }
+        
+        // 3.6 技法去抖：连续多帧判定一致才采纳，否则沿用当前已确认的技法
+        if technique == pendingTechnique {
+            pendingTechniqueFrames += 1
+        } else {
+            pendingTechnique = technique
+            pendingTechniqueFrames = 1
+        }
+        let isStable = pendingTechniqueFrames >= techniqueStableFrames
+        let stableTechnique = isStable ? pendingTechnique : detectedTechnique
+        
+        // 技法改变时打印日志
+        if stableTechnique != .unknown && stableTechnique != detectedTechnique {
+            print("🎯 检测到技法: \(stableTechnique.rawValue)")
+            detectedTechnique = stableTechnique
+        } else if stableTechnique == .unknown && detectedTechnique != .unknown {
+            print("⚠️ 技法识别丢失")
+            detectedTechnique = .unknown
+        }
+        
+        // 4. 评估姿势
+        if stableTechnique != .unknown {
+            currentEvaluation = evaluatePosture(
+                technique: stableTechnique,
+                features: features
+            )
+            
+            updateStatusMessage()
+        }
+    }
+    
+    // MARK: - Skeleton Overlay Generation
+    
+    /// 生成手部骨骼覆盖图像
+    private func generateSkeletonOverlay(from pose: HandPoseData, pixelBuffer: CVPixelBuffer) {
+        // 获取图像尺寸
+        let width = CVPixelBufferGetWidth(pixelBuffer)
+        let height = CVPixelBufferGetHeight(pixelBuffer)
+        let imageSize = CGSize(width: width, height: height)
+        
+        // 生成简化的手部可视化（只绘制手指尖端和手腕）
+        skeletonOverlayImage = drawSimplifiedHandSkeleton(
+            pose: pose,
+            imageSize: imageSize
+        )
+    }
+    
+    /// 绘制简化的手部骨骼（只显示手指尖端和手腕）
+    private func drawSimplifiedHandSkeleton(pose: HandPoseData, imageSize: CGSize) -> UIImage? {
+        UIGraphicsBeginImageContextWithOptions(imageSize, false, 0)
+        guard let context = UIGraphicsGetCurrentContext() else {
+            return nil
+        }
+        
+        // 设置绘图属性
+        context.setStrokeColor(UIColor.systemPink.cgColor)
+        context.setLineWidth(3.0)
+        context.setLineCap(.round)
+        context.setLineJoin(.round)
+        
+        // 收集所有手指尖端位置
+        var fingerTips: [CGPoint] = []
+        if let thumbTip = pose.thumbTip {
+            fingerTips.append(thumbTip)
+        }
+        if let indexTip = pose.indexTip {
+            fingerTips.append(indexTip)
+        }
+        if let middleTip = pose.middleTip {
+            fingerTips.append(middleTip)
+        }
+        if let ringTip = pose.ringTip {
+            fingerTips.append(ringTip)
+        }
+        if let littleTip = pose.littleTip {
+            fingerTips.append(littleTip)
+        }
+        
+        // 如果有手腕位置，从手腕到各个手指尖端绘制线条
+        if let wrist = pose.wrist {
+            for fingerTip in fingerTips {
+                let wristPoint = convertVisionPointToUIKit(wrist, imageSize: imageSize)
+                let tipPoint = convertVisionPointToUIKit(fingerTip, imageSize: imageSize)
+                
+                context.move(to: wristPoint)
+                context.addLine(to: tipPoint)
+            }
+            context.strokePath()
+            
+            // 绘制手腕点
+            drawCircle(at: wrist, context: context, imageSize: imageSize, color: .systemBlue, radius: 8)
+        }
+        
+        // 绘制手指尖端
+        if let thumbTip = pose.thumbTip {
+            drawCircle(at: thumbTip, context: context, imageSize: imageSize, color: .systemPink, radius: 10)
+        }
+        if let indexTip = pose.indexTip {
+            drawCircle(at: indexTip, context: context, imageSize: imageSize, color: .systemGreen, radius: 10)
+        }
+        if let middleTip = pose.middleTip {
+            drawCircle(at: middleTip, context: context, imageSize: imageSize, color: .systemOrange, radius: 10)
+        }
+        if let ringTip = pose.ringTip {
+            drawCircle(at: ringTip, context: context, imageSize: imageSize, color: .systemYellow, radius: 10)
+        }
+        if let littleTip = pose.littleTip {
+            drawCircle(at: littleTip, context: context, imageSize: imageSize, color: .systemPurple, radius: 10)
+        }
+        
+        let image = UIGraphicsGetImageFromCurrentImageContext()
+        UIGraphicsEndImageContext()
+        
+        return image
+    }
+    
+    /// 将 Vision 坐标系转换为 UIKit 坐标系
+    private func convertVisionPointToUIKit(_ point: CGPoint, imageSize: CGSize) -> CGPoint {
+        return CGPoint(
+            x: point.x * imageSize.width,
+            y: (1 - point.y) * imageSize.height
+        )
+    }
+    
+    /// 在指定位置绘制圆形
+    private func drawCircle(at point: CGPoint, context: CGContext, imageSize: CGSize, color: UIColor, radius: CGFloat) {
+        let uiPoint = convertVisionPointToUIKit(point, imageSize: imageSize)
+        context.setFillColor(color.cgColor)
+        let rect = CGRect(
+            x: uiPoint.x - radius,
+            y: uiPoint.y - radius,
+            width: radius * 2,
+            height: radius * 2
+        )
+        context.fillEllipse(in: rect)
+    }
+    
+    /// 将 HandPoseData 转换为 HandKeypoint 数组
+    private func convertToKeypoints(from pose: HandPoseData) -> [HandKeypoint] {
+        var keypoints: [HandKeypoint] = []
+        
+        // 从 HandPoseData 提取手指尖端和手腕位置
+        let fingerTips: [(CGPoint?, String)] = [
+            (pose.wrist, "wrist"),
+            (pose.thumbTip, "thumbTip"),
+            (pose.indexTip, "indexTip"),
+            (pose.middleTip, "middleTip"),
+            (pose.ringTip, "ringTip"),
+            (pose.littleTip, "littleTip")
+        ]
+        
+        // 提取每个有效的关键点
+        for (location, name) in fingerTips {
+            if let loc = location {
+                keypoints.append(HandKeypoint(
+                    name: name,
+                    location: loc,
+                    confidence: Double(pose.confidence)
+                ))
+            }
+        }
+        
+        return keypoints
+    }
+    
+    // MARK: - Posture Evaluation
+    
+    /// 评估姿势
+    private func evaluatePosture(
+        technique: TechniqueType,
+        features: HandMotionFeatures
+    ) -> PostureEvaluation {
+        switch technique {
+        case .roll:
+            return rollEvaluator.evaluate(features: features)
+            
+        case .sweep:
+            return sweepEvaluator.evaluate(features: features)
+            
+        case .pluck:
+            return pluckEvaluator.evaluate(features: features)
+            
+        case .unknown:
+            return PostureEvaluation(
+                overallScore: 0,
+                aspects: [],
+                suggestions: ["请开始弹奏"]
+            )
+        }
+    }
+    
+    // MARK: - UI Updates
+    
+    private func updateStatusMessage() {
+        guard let evaluation = currentEvaluation else {
+            statusMessage = "分析中..."
+            return
+        }
+        
+        let score = evaluation.overallScore
+        
+        if score >= 90 {
+            statusMessage = "🌟 姿势优秀！"
+        } else if score >= 80 {
+            statusMessage = "👍 姿势良好！"
+        } else if score >= 70 {
+            statusMessage = "👌 继续保持！"
+        } else if score >= 60 {
+            statusMessage = "💪 注意调整姿势"
+        } else {
+            statusMessage = "⚠️ 需要改进姿势"
+        }
+    }
+    
+    // MARK: - Timer Management
+    
+    private func startDurationTimer() {
+        durationTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
+            guard let self = self, let start = self.startTime else { return }
+            Task { @MainActor in
+                self.sessionDuration = Date().timeIntervalSince(start)
+            }
+        }
+    }
+    
+    private func stopDurationTimer() {
+        durationTimer?.invalidate()
+        durationTimer = nil
+    }
+    
+    // MARK: - Simulated Detection (临时测试功能)
+    
+    /// 启动模拟技法检测
+    /// 注意：这是临时测试代码，用于在 Vision 检测实现前验证 UI 功能
+    private func startSimulatedDetection() {
+        print("🧪 [测试模式] 启动模拟技法检测")
+        print("   2秒后将自动模拟检测到\"轮指\"技法")
+        
+        Task {
+            try? await Task.sleep(nanoseconds: 2_000_000_000) // 2秒延迟
+            
+            await MainActor.run {
+                guard isAnalyzing else { return }
+                
+                // 模拟检测到轮指
+                detectedTechnique = .roll
+                print("🧪 [测试模式] 模拟检测到技法: \(detectedTechnique.rawValue)")
+                
+                // 模拟评估结果
+                currentEvaluation = PostureEvaluation(
+                    overallScore: 85,
+                    aspects: [
+                        EvaluationAspect(
+                            category: .handShape,
+                            score: 90,
+                            description: "手型自然"
+                        ),
+                        EvaluationAspect(
+                            category: .fingerAngle,
+                            score: 80,
+                            description: "角度良好"
+                        ),
+                        EvaluationAspect(
+                            category: .rhythm,
+                            score: 85,
+                            description: "节奏稳定"
+                        )
+                    ],
+                    suggestions: ["保持当前节奏", "注意手指独立性"]
+                )
+                
+                updateStatusMessage()
+                print("🧪 [测试模式] 滚动字幕应该已显示")
+            }
+        }
+    }
+    
+    /// 手动设置技法（供测试菜单使用）
+    func setTechnique(_ technique: TechniqueType) {
+        print("🧪 [测试模式] 手动切换技法: \(technique.rawValue)")
+        detectedTechnique = technique
+        
+        if technique != .unknown {
+            // 根据不同技法提供不同的模拟评分
+            let score: Double
+            switch technique {
+            case .roll:
+                score = 85
+            case .sweep:
+                score = 78
+            case .pluck:
+                score = 82
+            case .unknown:
+                score = 0
+            }
+            
+            currentEvaluation = PostureEvaluation(
+                overallScore: score,
+                aspects: [
+                    EvaluationAspect(
+                        category: .handShape,
+                        score: score + 5,
+                        description: "手型\(score > 80 ? "优秀" : "良好")"
+                    ),
+                    EvaluationAspect(
+                        category: .rhythm,
+                        score: score,
+                        description: "节奏\(score > 80 ? "稳定" : "一般")"
+                    )
+                ],
+                suggestions: ["继续保持"]
+            )
+            
+            updateStatusMessage()
+        } else {
+            currentEvaluation = nil
+            statusMessage = "请开始弹奏"
+        }
+    }
+    
+    // MARK: - Core ML 声音分类
+    
+    /// 启动端侧声音分类，为技法识别提供音频侧佐证
+    private func startSoundClassification() async {
+        guard soundClassifier.isAvailable else {
+            print("⚠️ PipaSoundClassifier 未加载成功，本次仅使用视觉通道识别技法")
+            soundSceneLabel = "声音模型不可用"
+            return
+        }
+        
+        let granted = await withCheckedContinuation { continuation in
+            AVAudioApplication.requestRecordPermission(completionHandler: { granted in
+                continuation.resume(returning: granted)
+            })
+        }
+        
+        guard granted else {
+            print("❌ 麦克风权限被拒绝，声音分类未启用")
+            soundSceneLabel = "未授权麦克风"
+            return
+        }
+        
+        soundClassifier.setResultHandler { [weak self] label, probability in
+            Task { @MainActor in
+                self?.applySoundResult(label: label, pipaProbability: probability)
+            }
+        }
+        
+        do {
+            try soundClassifier.start()
+            print("🎧 声音分类已启动：Core ML PipaSoundClassifier，16 kHz 端侧推理")
+        } catch {
+            print("❌ 声音分类启动失败: \(error.localizedDescription)")
+            soundSceneLabel = "麦克风启动失败"
+        }
+    }
+    
+    /// 记录声音分类结果
+    private func applySoundResult(label: String, pipaProbability: Double) {
+        hasSoundResult = true
+        soundSceneLabel = label
+        pipaConfidence = pipaProbability
+        isPipaSoundDetected = label == "琵琶声" && pipaProbability >= 0.5
+    }
+    
+    // MARK: - Permissions
+    
+    /// 请求摄像头权限
+    private func requestCameraPermission() async -> Bool {
+        await withCheckedContinuation { continuation in
+            AVCaptureDevice.requestAccess(for: .video) { granted in
+                continuation.resume(returning: granted)
+            }
+        }
+    }
+}
+
+// MARK: - 手部姿势数据模型
+
+struct HandPoseData {
+    let timestamp: Date
+    let thumbTip: CGPoint?
+    let indexTip: CGPoint?
+    let middleTip: CGPoint?
+    let ringTip: CGPoint?
+    let littleTip: CGPoint?
+    let wrist: CGPoint?
+    let confidence: Float
+}
+
+// MARK: - 运动特征
+
+struct HandMotionFeatures {
+    // 位置特征
+    var fingerTipPositions: [CGPoint]
+    var wristPosition: CGPoint
+    
+    // 速度特征
+    var fingerVelocities: [CGVector]
+    var wristVelocity: CGVector
+    
+    // 角度特征
+    var fingerAngles: [Double]
+    var wristAngle: Double
+    
+    // 节奏特征
+    var movementFrequency: Double
+    var sequencePattern: [Int]
+}
+
+// MARK: - 姿势评估结果
+
+struct PostureEvaluation {
+    var overallScore: Double        // 0-100 总分
+    var aspects: [EvaluationAspect] // 各维度评分
+    var suggestions: [String]       // 改进建议
+}
+
+struct EvaluationAspect {
+    enum Category: String {
+        case handShape = "手型"
+        case fingerAngle = "手指角度"
+        case wristPosition = "手腕位置"
+        case rhythm = "节奏稳定性"
+        case relaxation = "放松程度"
+    }
+    
+    let category: Category
+    let score: Double       // 0-100
+    let description: String
+}
+
+// MARK: - Placeholder 实现（待完善）
+
+/// 手部姿势分析器
+class HandPoseAnalyzer {
+    private let extractor = HandPoseExtractor()
+    
+    func analyzeHand(in pixelBuffer: CVPixelBuffer) async -> HandPoseData? {
+        // 使用 Vision 框架检测手部关键点
+        guard let keypoints = try? await extractor.extractKeypoints(from: pixelBuffer),
+              !keypoints.isEmpty else {
+            print("⚠️ 未检测到手部关键点")  // 调试日志
+            return nil
+        }
+        
+        print("✅ 检测到 \(keypoints.count) 个关键点")  // 调试日志
+        
+        // 提取特定手指尖端位置
+        let thumbTip = keypoints.first(where: { $0.name.contains("thumbTip") })?.location
+        let indexTip = keypoints.first(where: { $0.name.contains("indexTip") })?.location
+        let middleTip = keypoints.first(where: { $0.name.contains("middleTip") })?.location
+        let ringTip = keypoints.first(where: { $0.name.contains("ringTip") })?.location
+        let littleTip = keypoints.first(where: { $0.name.contains("littleTip") })?.location
+        let wrist = keypoints.first(where: { $0.name.contains("wrist") })?.location
+        
+        // 调试：打印找到的关键点
+        if thumbTip != nil { print("  ✓ 找到拇指") }
+        if indexTip != nil { print("  ✓ 找到食指") }
+        if middleTip != nil { print("  ✓ 找到中指") }
+        if ringTip != nil { print("  ✓ 找到无名指") }
+        if littleTip != nil { print("  ✓ 找到小指") }
+        if wrist != nil { print("  ✓ 找到手腕") }
+        
+        // 计算平均置信度
+        let avgConfidence = Float(keypoints.map { $0.confidence }.reduce(0, +) / Double(keypoints.count))
+        
+        return HandPoseData(
+            timestamp: Date(),
+            thumbTip: thumbTip,
+            indexTip: indexTip,
+            middleTip: middleTip,
+            ringTip: ringTip,
+            littleTip: littleTip,
+            wrist: wrist,
+            confidence: avgConfidence
+        )
+    }
+}
+
+/// 运动特征提取器
+class MotionFeatureExtractor {
+    // 历史姿势队列（用于计算速度和运动模式）
+    private var poseHistory: [HandPoseData] = []
+    private let maxHistorySize = 10 // 保留最近 10 帧
+    
+    func extractFeatures(from handPose: HandPoseData) -> HandMotionFeatures {
+        // 1. 添加到历史队列
+        poseHistory.append(handPose)
+        if poseHistory.count > maxHistorySize {
+            poseHistory.removeFirst()
+        }
+        
+        // 2. 提取位置特征
+        let fingerPositions = [
+            handPose.thumbTip ?? .zero,
+            handPose.indexTip ?? .zero,
+            handPose.middleTip ?? .zero,
+            handPose.ringTip ?? .zero,
+            handPose.littleTip ?? .zero
+        ]
+        let wristPos = handPose.wrist ?? .zero
+        
+        // 3. 计算速度特征
+        let velocities = calculateFingerVelocities()
+        let wristVel = calculateWristVelocity()
+        
+        // 4. 计算角度特征
+        let angles = calculateFingerAngles(handPose: handPose)
+        let wristAngle = calculateWristAngle(handPose: handPose)
+        
+        // 5. 计算节奏特征
+        let frequency = calculateMovementFrequency()
+        let pattern = detectSequencePattern()
+        
+        return HandMotionFeatures(
+            fingerTipPositions: fingerPositions,
+            wristPosition: wristPos,
+            fingerVelocities: velocities,
+            wristVelocity: wristVel,
+            fingerAngles: angles,
+            wristAngle: wristAngle,
+            movementFrequency: frequency,
+            sequencePattern: pattern
+        )
+    }
+    
+    // MARK: - 速度计算
+    
+    private func calculateFingerVelocities() -> [CGVector] {
+        guard poseHistory.count >= 2 else {
+            return Array(repeating: .zero, count: 5)
+        }
+        
+        let current = poseHistory.last!
+        let previous = poseHistory[poseHistory.count - 2]
+        let timeDiff = current.timestamp.timeIntervalSince(previous.timestamp)
+        
+        guard timeDiff > 0 else {
+            return Array(repeating: .zero, count: 5)
+        }
+        
+        let fingers = [
+            (current.thumbTip, previous.thumbTip),
+            (current.indexTip, previous.indexTip),
+            (current.middleTip, previous.middleTip),
+            (current.ringTip, previous.ringTip),
+            (current.littleTip, previous.littleTip)
+        ]
+        
+        return fingers.map { curr, prev in
+            guard let curr = curr, let prev = prev else { return .zero }
+            let dx = (curr.x - prev.x) / CGFloat(timeDiff)
+            let dy = (curr.y - prev.y) / CGFloat(timeDiff)
+            return CGVector(dx: dx, dy: dy)
+        }
+    }
+    
+    private func calculateWristVelocity() -> CGVector {
+        guard poseHistory.count >= 2 else { return .zero }
+        
+        let current = poseHistory.last!
+        let previous = poseHistory[poseHistory.count - 2]
+        let timeDiff = current.timestamp.timeIntervalSince(previous.timestamp)
+        
+        guard timeDiff > 0,
+              let currWrist = current.wrist,
+              let prevWrist = previous.wrist else {
+            return .zero
+        }
+        
+        let dx = (currWrist.x - prevWrist.x) / CGFloat(timeDiff)
+        let dy = (currWrist.y - prevWrist.y) / CGFloat(timeDiff)
+        return CGVector(dx: dx, dy: dy)
+    }
+    
+    // MARK: - 角度计算
+    
+    private func calculateFingerAngles(handPose: HandPoseData) -> [Double] {
+        // 计算每个手指相对于手腕的角度
+        guard let wrist = handPose.wrist else {
+            return Array(repeating: 0, count: 5)
+        }
+        
+        let fingers = [
+            handPose.thumbTip,
+            handPose.indexTip,
+            handPose.middleTip,
+            handPose.ringTip,
+            handPose.littleTip
+        ]
+        
+        return fingers.map { fingerTip in
+            guard let tip = fingerTip else { return 0 }
+            let dx = tip.x - wrist.x
+            let dy = tip.y - wrist.y
+            return atan2(Double(dy), Double(dx))
+        }
+    }
+    
+    private func calculateWristAngle(handPose: HandPoseData) -> Double {
+        // 计算手腕相对于水平线的角度
+        guard let wrist = handPose.wrist,
+              let middleTip = handPose.middleTip else {
+            return 0
+        }
+        
+        let dx = middleTip.x - wrist.x
+        let dy = middleTip.y - wrist.y
+        return atan2(Double(dy), Double(dx))
+    }
+    
+    // MARK: - 节奏分析
+    
+    private func calculateMovementFrequency() -> Double {
+        guard poseHistory.count >= 5 else { return 0 }
+        
+        // 计算最近 5 帧的平均运动速度
+        var totalSpeed: Double = 0
+        for i in 1..<min(5, poseHistory.count) {
+            let curr = poseHistory[poseHistory.count - i]
+            let prev = poseHistory[poseHistory.count - i - 1]
+            
+            if let currIndex = curr.indexTip, let prevIndex = prev.indexTip {
+                let distance = hypot(Double(currIndex.x - prevIndex.x), Double(currIndex.y - prevIndex.y))
+                totalSpeed += distance
+            }
+        }
+        
+        return totalSpeed / Double(min(4, poseHistory.count - 1))
+    }
+    
+    private func detectSequencePattern() -> [Int] {
+        // 检测手指运动顺序（0=拇指, 1=食指, 2=中指, 3=无名指, 4=小指）
+        guard poseHistory.count >= 3 else { return [] }
+        
+        var pattern: [Int] = []
+        
+        // 比较最近几帧，找出哪个手指移动最快
+        for i in 1..<min(3, poseHistory.count) {
+            let curr = poseHistory[poseHistory.count - i]
+            let prev = poseHistory[poseHistory.count - i - 1]
+            
+            let fingers = [
+                (curr.thumbTip, prev.thumbTip, 0),
+                (curr.indexTip, prev.indexTip, 1),
+                (curr.middleTip, prev.middleTip, 2),
+                (curr.ringTip, prev.ringTip, 3),
+                (curr.littleTip, prev.littleTip, 4)
+            ]
+            
+            var maxMovement: Double = 0
+            var movingFinger = -1
+            
+            for (currTip, prevTip, index) in fingers {
+                guard let curr = currTip, let prev = prevTip else { continue }
+                let distance = hypot(Double(curr.x - prev.x), Double(curr.y - prev.y))
+                if distance > maxMovement && distance > 0.01 { // 阈值：1% 的屏幕
+                    maxMovement = distance
+                    movingFinger = index
+                }
+            }
+            
+            if movingFinger >= 0 {
+                pattern.append(movingFinger)
+            }
+        }
+        
+        return pattern
+    }
+    
+    /// 重置历史数据
+    func reset() {
+        poseHistory.removeAll()
+    }
+}
+
+/// 技法分类器
+class TechniqueClassifier {
+    private var classificationHistory: [TechniqueType] = []
+    private let historySize = 5 // 使用最近 5 次分类结果进行平滑
+    
+    func classify(features: HandMotionFeatures) -> TechniqueType {
+        let technique = classifyBasedOnRules(features: features)
+        
+        // 添加到历史并进行平滑处理
+        classificationHistory.append(technique)
+        if classificationHistory.count > historySize {
+            classificationHistory.removeFirst()
+        }
+        
+        // 返回最常见的分类（防止抖动）
+        return mostFrequentTechnique() ?? technique
+    }
+    
+    // MARK: - 基于规则的分类
+    
+    private func classifyBasedOnRules(features: HandMotionFeatures) -> TechniqueType {
+        // 检查是否有足够的数据
+        guard !features.fingerVelocities.isEmpty,
+              !features.sequencePattern.isEmpty else {
+            return .unknown
+        }
+        
+        // 计算手指平均速度
+        let avgSpeed = features.fingerVelocities.map { hypot(Double($0.dx), Double($0.dy)) }
+            .reduce(0, +) / Double(features.fingerVelocities.count)
+        
+        // 计算手腕移动速度
+        let wristSpeed = hypot(Double(features.wristVelocity.dx), Double(features.wristVelocity.dy))
+        
+        // 1️⃣ 判断是否为"扫弦" (Sweep)
+        // 特征：所有手指同时快速移动 + 手腕也在动
+        let fastFingers = features.fingerVelocities.filter { 
+            hypot(Double($0.dx), Double($0.dy)) > 0.5 
+        }.count
+        if fastFingers >= 4 && wristSpeed > 0.3 {
+            print("🎸 规则匹配：扫弦 (快速手指:\(fastFingers), 手腕速度:\(String(format: "%.2f", wristSpeed)))")
+            return .sweep
+        }
+        
+        // 2️⃣ 判断是否为"轮指" (Roll)
+        // 特征：手指依次运动（有明确的顺序模式）
+        if isSequentialPattern(features.sequencePattern) && avgSpeed > 0.2 {
+            print("🔄 规则匹配：轮指 (顺序模式:\(features.sequencePattern), 平均速度:\(String(format: "%.2f", avgSpeed)))")
+            return .roll
+        }
+        
+        // 3️⃣ 判断是否为"弹挑" (Pluck)
+        // 特征：单个手指快速运动，其他手指相对静止
+        let movingFingers = features.fingerVelocities.enumerated().filter { index, velocity in
+            hypot(Double(velocity.dx), Double(velocity.dy)) > 0.4
+        }
+        
+        if movingFingers.count == 1 || movingFingers.count == 2 {
+            print("👆 规则匹配：弹挑 (活跃手指数:\(movingFingers.count))")
+            return .pluck
+        }
+        
+        // 4️⃣ 如果有中等速度的运动，但不符合上述模式
+        if avgSpeed > 0.15 {
+            // 默认判断为轮指（最常见）
+            print("🤔 模糊匹配：默认为轮指 (平均速度:\(String(format: "%.2f", avgSpeed)))")
+            return .roll
+        }
+        
+        // 5️⃣ 没有明显运动
+        return .unknown
+    }
+    
+    // MARK: - 辅助方法
+    
+    /// 判断是否为顺序模式（如 [1,2,3] 或 [4,3,2,1]）
+    private func isSequentialPattern(_ pattern: [Int]) -> Bool {
+        guard pattern.count >= 2 else { return false }
+        
+        // 检查是否为递增序列
+        let isAscending = pattern.enumerated().dropFirst().allSatisfy { index, value in
+            value > pattern[index - 1]
+        }
+        
+        // 检查是否为递减序列
+        let isDescending = pattern.enumerated().dropFirst().allSatisfy { index, value in
+            value < pattern[index - 1]
+        }
+        
+        return isAscending || isDescending
+    }
+    
+    /// 返回历史记录中最常见的技法（平滑处理）
+    private func mostFrequentTechnique() -> TechniqueType? {
+        guard !classificationHistory.isEmpty else { return nil }
+        
+        // 统计每种技法出现的次数
+        var counts: [TechniqueType: Int] = [:]
+        for technique in classificationHistory {
+            counts[technique, default: 0] += 1
+        }
+        
+        // 找出出现次数最多的
+        let sorted = counts.sorted { $0.value > $1.value }
+        let mostCommon = sorted.first?.key
+        
+        // 如果最常见的是 unknown，尝试返回第二常见的
+        if mostCommon == .unknown, sorted.count > 1 {
+            return sorted[1].key
+        }
+        
+        return mostCommon
+    }
+    
+    /// 重置分类历史
+    func reset() {
+        classificationHistory.removeAll()
+    }
+}
+
+// MARK: - Core ML 声音分类引擎
+
+/// 加载 Create ML 自训的声音分类模型 PipaSoundClassifier，
+/// 用 AVAudioEngine 采集 16 kHz 音频，在设备本地做四分类推理（琵琶 / 其它乐器 / 人声 / 环境噪声）。
+/// 全流程不联网、不落盘、不上传：音频只在内存里滑动，推理在端侧完成。
+final class PipaSoundClassifierEngine: @unchecked Sendable {
+    
+    /// 模型要求的输入采样率
+    static let sampleRate: Double = 16000
+    
+    /// 模型是否成功加载——加载失败时调用方应降级为纯视觉识别
+    private(set) var isAvailable: Bool = false
+    
+    private let model: MLModel?
+    private let inputName: String
+    private let inputShape: [NSNumber]
+    private let windowLength: Int
+    private let hopLength: Int
+    
+    private let queue = DispatchQueue(label: "com.pluckbuddy.soundclassifier", qos: .userInitiated)
+    private var resultHandler: (@Sendable (String, Double) -> Void)?
+    private var engine: AVAudioEngine?
+    private var pendingSamples: [Float] = []
+    private var recentProbabilities: [Double] = []
+    private var isRunning = false
+    private var didActivateSession = false
+    
+    init() {
+        let loaded = Self.loadModel()
+        model = loaded?.model
+        inputName = loaded?.inputName ?? "audioSamples"
+        inputShape = loaded?.shape ?? [NSNumber(value: 15600)]
+        windowLength = loaded?.length ?? 15600
+        hopLength = max((loaded?.length ?? 15600) / 2, 1)
+        isAvailable = loaded != nil
+    }
+    
+    deinit {
+        stop()
+    }
+    
+    // MARK: - 模型加载
+    
+    private struct LoadedModel {
+        let model: MLModel
+        let inputName: String
+        let shape: [NSNumber]
+        let length: Int
+    }
+    
+    private static func loadModel() -> LoadedModel? {
+        let configuration = MLModelConfiguration()
+        configuration.computeUnits = .all
+        
+        // Xcode 会把 .mlmodel 编译成 Bundle 里的 .mlmodelc；找不到时现场编译兜底
+        var modelURL = Bundle.main.url(forResource: "PipaSoundClassifier", withExtension: "mlmodelc")
+        if modelURL == nil,
+           let rawURL = Bundle.main.url(forResource: "PipaSoundClassifier", withExtension: "mlmodel") {
+            modelURL = try? MLModel.compileModel(at: rawURL)
+        }
+        
+        guard let url = modelURL,
+              let model = try? MLModel(contentsOf: url, configuration: configuration) else {
+            print("❌ PipaSoundClassifier 加载失败：Bundle 中找不到可用模型")
+            return nil
+        }
+        
+        let inputs = model.modelDescription.inputDescriptionsByName
+        let inputName = inputs["audioSamples"] != nil ? "audioSamples" : (inputs.keys.first ?? "audioSamples")
+        let shape = inputs[inputName]?.multiArrayConstraint?.shape ?? [NSNumber(value: 15600)]
+        let length = shape.reduce(1) { $0 * $1.intValue }
+        
+        print("✅ PipaSoundClassifier 已加载")
+        print("   输入: \(inputName) \(shape.map { $0.intValue }) → \(length) 个采样点")
+        print("   输出: \(model.modelDescription.outputDescriptionsByName.keys.sorted())")
+        
+        return LoadedModel(model: model, inputName: inputName, shape: shape, length: length)
+    }
+    
+    // MARK: - 采集控制
+    
+    /// 设置推理结果回调（中文类别 + 琵琶概率）
+    func setResultHandler(_ handler: @escaping @Sendable (String, Double) -> Void) {
+        queue.sync { resultHandler = handler }
+    }
+    
+    func start() throws {
+        var failure: Error?
+        
+        queue.sync {
+            guard !isRunning, model != nil else { return }
+            
+            let session = AVAudioSession.sharedInstance()
+            do {
+                // 与调音器 AudioManager 使用同一套会话配置：可录音也可外放（节拍器/示范音），
+                // 且允许与其他音频混播，避免把会话切成纯录音后打断正在播放的声音
+                try session.setCategory(.playAndRecord, mode: .measurement, options: [.mixWithOthers, .defaultToSpeaker])
+                try session.setActive(true)
+                didActivateSession = true
+            } catch {
+                failure = error
+                return
+            }
+            
+            let audioEngine = AVAudioEngine()
+            let input = audioEngine.inputNode
+            // 关键点：tap 必须使用输入节点自身的输出格式（真机实测为 48 kHz）。
+            // 若在这里指定成模型需要的 16 kHz，AVAudioEngine 会抛
+            // "Failed to create tap due to format mismatch" 并终止进程。
+            // 因此改为按硬件格式采集，降到 16 kHz 的步骤放到回调里用软件完成。
+            let inputFormat = input.outputFormat(forBus: 0)
+            print("🎤 声音分类采集格式：\(inputFormat.sampleRate) Hz / \(inputFormat.channelCount) 声道")
+            
+            input.installTap(onBus: 0, bufferSize: 4096, format: inputFormat) { [weak self] buffer, _ in
+                guard let self else { return }
+                let samples = Self.monoSamples(from: buffer, targetSampleRate: Self.sampleRate)
+                self.queue.async { self.append(samples) }
+            }
+            
+            do {
+                try audioEngine.start()
+            } catch {
+                input.removeTap(onBus: 0)
+                failure = error
+                return
+            }
+            
+            engine = audioEngine
+            pendingSamples.removeAll()
+            recentProbabilities.removeAll()
+            isRunning = true
+        }
+        
+        if let failure {
+            throw failure
+        }
+    }
+    
+    func stop() {
+        queue.sync {
+            guard isRunning else { return }
+            engine?.inputNode.removeTap(onBus: 0)
+            engine?.stop()
+            engine = nil
+            pendingSamples.removeAll()
+            recentProbabilities.removeAll()
+            isRunning = false
+            // 只有这次采集确实是我们激活的会话才去关闭，避免误伤调音器还在用的会话
+            if didActivateSession {
+                try? AVAudioSession.sharedInstance().setActive(false)
+                didActivateSession = false
+            }
+        }
+    }
+    
+    // MARK: - 推理
+    
+    /// 累积到一整窗后推理一次，窗口之间保留一半重叠
+    private func append(_ samples: [Float]) {
+        guard !samples.isEmpty else { return }
+        pendingSamples.append(contentsOf: samples)
+        
+        while pendingSamples.count >= windowLength {
+            let window = Array(pendingSamples.prefix(windowLength))
+            pendingSamples.removeFirst(min(hopLength, pendingSamples.count))
+            classify(window)
+        }
+        
+        // 推理跟不上采集时丢弃积压，避免内存无限增长
+        if pendingSamples.count > windowLength * 4 {
+            pendingSamples.removeFirst(pendingSamples.count - windowLength)
+        }
+    }
+    
+    private func classify(_ window: [Float]) {
+        guard let model, window.count == windowLength else { return }
+        guard let array = try? MLMultiArray(shape: inputShape, dataType: .float32) else { return }
+        for index in 0..<windowLength {
+            array[index] = NSNumber(value: window[index])
+        }
+        let value = MLFeatureValue(multiArray: array)
+        
+        let provider: MLFeatureProvider
+        do {
+            provider = try MLDictionaryFeatureProvider(dictionary: [inputName: value])
+        } catch {
+            return
+        }
+        
+        guard let output = try? model.prediction(from: provider) else { return }
+        
+        let rawLabel = output.featureValue(for: "target")?.stringValue ?? "background"
+        let probability = (output.featureValue(for: "targetProbability")?.dictionaryValue["pipa"] as? NSNumber)?.doubleValue ?? 0
+        
+        // 最近三次结果取平均，抑制单帧抖动
+        recentProbabilities.append(probability)
+        if recentProbabilities.count > 3 {
+            recentProbabilities.removeFirst()
+        }
+        let smoothed = recentProbabilities.reduce(0, +) / Double(recentProbabilities.count)
+        
+        resultHandler?(Self.chineseLabel(for: rawLabel), smoothed)
+    }
+    
+    // MARK: - 音频处理
+    
+    /// 把任意格式的 PCM 缓冲混合成单声道，并按模型采样率重采样
+    private static func monoSamples(from buffer: AVAudioPCMBuffer, targetSampleRate: Double) -> [Float] {
+        let frameCount = Int(buffer.frameLength)
+        guard frameCount > 0 else { return [] }
+        
+        let channelCount = max(Int(buffer.format.channelCount), 1)
+        var mono = [Float](repeating: 0, count: frameCount)
+        
+        switch buffer.format.commonFormat {
+        case .pcmFormatFloat32:
+            guard let data = buffer.floatChannelData else { return [] }
+            for channel in 0..<channelCount {
+                let source = data[channel]
+                for i in 0..<frameCount { mono[i] += source[i] }
+            }
+            
+        case .pcmFormatInt16:
+            guard let data = buffer.int16ChannelData else { return [] }
+            for channel in 0..<channelCount {
+                let source = data[channel]
+                for i in 0..<frameCount { mono[i] += Float(source[i]) / 32768 }
+            }
+            
+        case .pcmFormatInt32:
+            guard let data = buffer.int32ChannelData else { return [] }
+            for channel in 0..<channelCount {
+                let source = data[channel]
+                for i in 0..<frameCount { mono[i] += Float(source[i]) / 2147483648 }
+            }
+            
+        default:
+            return []
+        }
+        
+        if channelCount > 1 {
+            let scale = 1 / Float(channelCount)
+            for i in 0..<frameCount { mono[i] *= scale }
+        }
+        
+        let sourceRate = buffer.format.sampleRate
+        guard sourceRate > 0, abs(sourceRate - targetSampleRate) > 1 else { return mono }
+        
+        // 48 kHz → 16 kHz 的软件重采样：线性插值，直接抽点会引入高频失真、影响分类置信度
+        let step = sourceRate / targetSampleRate
+        let targetCount = max(Int((Double(frameCount) - 1) / step), 1)
+        var resampled = [Float](repeating: 0, count: targetCount)
+        for i in 0..<targetCount {
+            let position = Double(i) * step
+            let index = min(Int(position), frameCount - 1)
+            let next = min(index + 1, frameCount - 1)
+            let fraction = Float(position - Double(index))
+            resampled[i] = mono[index] + (mono[next] - mono[index]) * fraction
+        }
+        return resampled
+    }
+    
+    private static func chineseLabel(for raw: String) -> String {
+        switch raw {
+        case "pipa": return "琵琶声"
+        case "other_instrument": return "其它乐器"
+        case "speech": return "人声"
+        case "background": return "环境噪声"
+        default: return raw
+        }
+    }
+}
+
+// MARK: - 注意：
+// RollPostureEvaluator, SweepPostureEvaluator, PluckPostureEvaluator
+// 这些类现在定义在 TechniqueEvaluators.swift 文件中
