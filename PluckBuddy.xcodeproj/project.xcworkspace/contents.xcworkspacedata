@@ -1,0 +1,13 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Workspace
+   version = "1.0">
+   <FileRef
+      location = "self:">
+   </FileRef>
+   <FileRef
+      location = "group:&#x95ee;&#x9898;&#x8bca;&#x65ad;&#x548c;&#x89e3;&#x51b3;&#x65b9;&#x6848;.md">
+   </FileRef>
+   <FileRef
+      location = "group:ScrollingTextTestView.swift">
+   </FileRef>
+</Workspace>

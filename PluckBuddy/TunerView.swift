@@ -35,6 +35,24 @@ struct TunerView: View {
                 }
                 .padding(.horizontal)
                 
+                // ✅ CoreML 判门状态：让「先判琵琶声、再判音高」可见
+                HStack(spacing: 6) {
+                    if viewModel.pipaFilterEnabled {
+                        Image(systemName: viewModel.pipaSoundDetected ? "checkmark.circle.fill" : "antenna.radiowaves.left.and.right")
+                            .foregroundStyle(viewModel.pipaSoundDetected ? Color.green : Color.gray)
+                        Text(viewModel.pipaSoundDetected ? "已检测到琵琶声" : (viewModel.pipaGateAvailable ? "聆听中…等待琵琶声" : "模型未加载，已降级"))
+                            .font(.caption)
+                            .foregroundStyle(viewModel.pipaSoundDetected ? Color.green : (viewModel.pipaGateAvailable ? Color.secondary : Color.orange))
+                    } else {
+                        // 关掉过滤时给个轻提示，避免用户以为界面挂了
+                        Image(systemName: "waveform")
+                            .foregroundStyle(.secondary)
+                        Text("通用模式：不区分声音类型")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                }
+                
                 // 实时波形显示
                 WaveformView(amplitudes: viewModel.waveformData)
                     .frame(height: 90)

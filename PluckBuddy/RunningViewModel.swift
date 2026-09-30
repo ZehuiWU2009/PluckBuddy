@@ -24,7 +24,7 @@ class RunningViewModel: ObservableObject {
     @Published var targetBPM: Double = 120 // 目标速度
     @Published var sessionDuration: TimeInterval = 0 // 当前练习时长（秒）
     @Published var targetDuration: TimeInterval = 300 // 目标时长（默认5分钟）
-    
+
     // 角色动画状态
     @Published var characterPosition: Double = 0.0 // 角色位置（0-1）- 已废弃，改用跑道移动
     @Published var isCharacterRunning = false
@@ -129,6 +129,7 @@ class RunningViewModel: ObservableObject {
                     guard let self = self,
                           let detector = self.rhythmDetector else { return }
                     
+                    // ✅ DSP 启发式门控已回退（实测效果不稳），直接交给节奏检测器处理
                     _ = detector.detectPluck(from: buffer)
                 }
                 

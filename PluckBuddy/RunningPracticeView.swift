@@ -60,8 +60,8 @@ struct RunningPracticeView: View {
                     )
                     .frame(height: geometry.size.height * 0.70)
                     .padding(.horizontal)
-                    
-                    Spacer()
+                
+                Spacer()
                     
                     // 开始/停止按钮
                     Button(action: togglePractice) {

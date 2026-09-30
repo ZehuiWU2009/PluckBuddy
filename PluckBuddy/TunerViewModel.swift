@@ -20,7 +20,10 @@ class TunerViewModel: ObservableObject {
     @Published var confidence: Double = 0.0 // 检测置信度
     @Published var waveformData: [Float] = Array(repeating: 0, count: 100) // 波形数据
     @Published var amplitudeLevel: Float = 0.0 // 当前振幅等级（用于可视化）
-    @Published var pipaFilterEnabled: Bool = true // ✅ 琵琶声过滤开关（默认开启）
+    @Published var pipaFilterEnabled: Bool = true // ✅ 琵琶声过滤开关（默认开启；通过 CoreML PipaSoundClassifier 做端侧四分类，门控音高判定）
+    @Published var pipaSoundDetected: Bool = false // ✅ CoreML 判门最新输出（最近一次推理是否判为琵琶），供界面反馈
+    @Published var pipaScoreValue: Double = 0.0 // ✅ CoreML 判门最新输出（pipa 概率，平滑后），供界面反馈
+    @Published var pipaGateAvailable: Bool = false // ✅ CoreML 判门是否可用；不可用时界面上明确告诉用户降级为通用模式
     
     // 稳定性控制
     private var stableCount: Int = 0
@@ -30,6 +33,9 @@ class TunerViewModel: ObservableObject {
     private var lastValidFrequency: Double = 0.0
     private var lastDetectionTime: Date?
     private let displayTimeout: TimeInterval = 3.0 // 3秒后才清除显示
+    
+    // ✅ 把 pipaGate 的 Published 转播到 ViewModel 上，让 View 不必直接观察 pipaGate
+    private var pipaGateCancellables = Set<AnyCancellable>()
     
     // MARK: - Pipa Standard Tuning
     struct PipaString {
@@ -49,7 +55,22 @@ class TunerViewModel: ObservableObject {
     // MARK: - Audio Components
     private var audioManager: AudioManager?
     private var pitchDetector: PitchDetector?
-    private var dspExtractor: DSPFeatureExtractor? // ✅ 新增：专业琵琶声检测
+    private var dspExtractor: DSPFeatureExtractor? // 保留 DSP 提取器（仅给波形用，不参与门控）
+    private let pipaGate = PipaSoundGate() // ✅ CoreML 琵琶声判门（端侧推理，与 AudioManager 共用麦克风源，不另起 AVAudioEngine）
+    
+    // MARK: - Init
+    init() {
+        pipaGateAvailable = pipaGate.isAvailable
+        // 把判门状态转播到 ViewModel 的 Published（让 View 一次性观察 viewModel 即可）
+        pipaGate.$isPipa
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] detected in self?.pipaSoundDetected = detected }
+            .store(in: &pipaGateCancellables)
+        pipaGate.$pipaProb
+            .receive(on: DispatchQueue.main)
+            .sink { [weak self] prob in self?.pipaScoreValue = prob }
+            .store(in: &pipaGateCancellables)
+    }
     
     // MARK: - Lifecycle
     func startListening() {
@@ -81,24 +102,25 @@ class TunerViewModel: ObservableObject {
                         self.updateWaveform(from: buffer)
                     }
                     
-                    // ✅ 专业琵琶声检测
+                    // ✅ 把缓冲同时喂给 CoreML 判门（异步：降采样+累积+推理都在后台队列，不阻塞音频回调）
+                    self.pipaGate.feed(buffer: buffer)
+                    
+                    // 计算频谱特征（仅用于音高检测）
                     guard let dsp = self.dspExtractor else { return }
                     let features = dsp.process(buffer: buffer)
                     
-                    // ✅ 根据开关决定是否过滤
-                    let shouldProcess: Bool
-                    if self.pipaFilterEnabled {
-                        // 开启过滤：只处理琵琶声（降低阈值，对A弦更友好）
-                        let pipaScore = dsp.pipaScore(features)
-                        shouldProcess = pipaScore >= 0.4 // 从 0.5 降到 0.4
-                        
-                        // 调试信息：打印琵琶声分数
-                        if features.pitchHz > 0 {
-                            print("🎵 Freq: \(features.pitchHz) Hz, Score: \(pipaScore)")
+                    // ✅ 门控：开「琵琶模式」时，要求 CoreML 在最近 0.5 秒内判定为「琵琶声」；
+                    //           关「琵琶模式」或模型加载失败时 → 全放行（与原来行为一致）。
+                    let gatePassed = self.pipaFilterEnabled ? self.pipaGate.isPipaRecent(within: 0.5) : true
+                    
+                    // RMS 能量 + 音高范围过滤明显噪声
+                    let shouldProcess = gatePassed && features.rms > 0.008 && features.pitchHz > 80
+                    
+                    // 反馈：开了过滤但当前帧不在「最近 0.5s 判为琵琶」的窗口内 → 给个等待提示
+                    if self.pipaFilterEnabled && !self.pipaGate.isPipaRecent(within: 0.5) && features.rms > 0.008 {
+                        Task { @MainActor in
+                            self.tuningMessage = "正在聆听…请弹奏琵琶"
                         }
-                    } else {
-                        // 关闭过滤：处理所有声音
-                        shouldProcess = features.rms > 0.008 // 从 0.01 降到 0.008
                     }
                     
                     guard shouldProcess else {
@@ -137,6 +159,7 @@ class TunerViewModel: ObservableObject {
     
     func stopListening() {
         audioManager?.stopListening()
+        pipaGate.reset() // ✅ 清掉 CoreML 判门的累积和「最近判定」标记
         resetDisplay()
     }
     
