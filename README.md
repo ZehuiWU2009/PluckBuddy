@@ -77,6 +77,10 @@ iOS 上多个模块都想用麦克风，但 AVAudioEngine 的 tap 只能被一�
 
 采用端侧全离线五层架构,从麦克风 / 摄像头原始数据到 UI 反馈全部在 iPhone 上完成,无任何网络依赖。
 
+![PluckBuddy 五层架构](docs/images/architecture.png)
+
+下图为详细的分层标注与模块映射（Mermaid 渲染）。
+
 ```mermaid
 flowchart TB
     subgraph L1 ["第 1 层 · 音视频采集"]
