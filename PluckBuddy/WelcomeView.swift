@@ -25,6 +25,8 @@ struct WelcomeView: View {
     let onEnter: () -> Void
     
     @State private var appeared = false
+    /// 退出动画进行中，避免倒计时与「跳过」重复触发退出
+    @State private var isDismissing = false
     /// 右上角读秒，每秒递减
     @State private var remaining = 3
     
@@ -82,18 +84,32 @@ struct WelcomeView: View {
             withAnimation(.easeOut(duration: 0.7)) {
                 appeared = true
             }
-            // 逐秒读秒，归零后进入主界面；视图消失时该 task 会被取消，不会重复触发
+            // 逐秒读秒，归零后淡出进入主界面；视图消失时该 task 会被取消，不会重复触发
             while remaining > 0 {
                 try? await Task.sleep(nanoseconds: 1_000_000_000)
                 remaining -= 1
             }
-            onEnter()
+            beginDismiss()
         }
     }
     
+    /// 退出欢迎页：先让本页淡出（透明度 + 轻微缩放），动画结束后再通知父视图移除。
+    /// 复制 onEnter 闭包异步调用，避免捕获 struct 视图自身。
+    private func beginDismiss() {
+        guard !isDismissing else { return }
+        isDismissing = true
+        let enter = onEnter
+        withAnimation(.easeInOut(duration: 0.5)) {
+            appeared = false
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.55) {
+            enter()
+        }
+    }
+
     /// 右上角「跳过 3」胶囊按钮，点击立即进入主界面
     private var skipButton: some View {
-        Button(action: onEnter) {
+        Button(action: beginDismiss) {
             HStack(spacing: 4) {
                 Text("跳过")
                 Text("\(remaining)")

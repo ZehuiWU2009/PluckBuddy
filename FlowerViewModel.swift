@@ -25,7 +25,7 @@ class FlowerViewModel: ObservableObject {
     @Published var sessionDuration: TimeInterval = 0 // 当前练习时长（秒）
     @Published var targetDuration: TimeInterval = 300 // 目标时长（默认5分钟）
     @Published var targetBPM: Double = 120 // ✨ 新增：目标速度（BPM）
-    
+
     // 花朵状态
     @Published var flowerGrowth: Double = 0.0 // 花朵生长进度 0-1
     @Published var petalCount: Int = 0 // 当前花瓣数
@@ -111,6 +111,7 @@ class FlowerViewModel: ObservableObject {
                     guard let self = self,
                           let detector = self.rollDetector else { return }
                     
+                    // ✅ DSP 启发式门控已回退（实测效果不稳），直接交给轮指检测器处理
                     _ = detector.detectRoll(from: buffer)
                 }
                 

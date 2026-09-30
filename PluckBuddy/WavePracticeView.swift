@@ -204,6 +204,7 @@ struct WavePracticeView: View {
                         .clipShape(RoundedRectangle(cornerRadius: 16))
                         .padding(.horizontal)
                         
+                        // ✅ 琵琶声检测状态行（已回退 DSP 启发式，不再显示）
                         // 状态提示
                         Text(viewModel.statusMessage)
                             .font(.body)

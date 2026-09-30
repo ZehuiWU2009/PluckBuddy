@@ -25,7 +25,7 @@ class WaveViewModel: ObservableObject {
     @Published var sessionDuration: TimeInterval = 0 // 当前练习时长（秒）
     @Published var targetDuration: TimeInterval = 300 // 目标时长（默认5分钟）
     @Published var targetBPM: Double = 60 // ✨ 新增：目标速度（BPM，扫弦通常较慢）
-    
+
     // 水波状态
     @Published var waves: [WaveRipple] = [] // 当前的水波
     @Published var waterColor: Color = .blue // 水面颜色
@@ -95,6 +95,7 @@ class WaveViewModel: ObservableObject {
                     guard let self = self,
                           let detector = self.sweepDetector else { return }
                     
+                    // ✅ DSP 启发式门控已回退（实测效果不稳），直接交给扫弦检测器处理
                     _ = detector.detectSweep(from: buffer)
                 }
                 

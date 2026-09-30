@@ -18,13 +18,14 @@ struct PluckBuddyApp: App {
     var body: some Scene {
         WindowGroup {
             ZStack {
+                // 主界面常驻底层；欢迎页淡出时主界面同步淡入，避免黑屏 / 闪白
+                HomeView()
+                    .environment(\.managedObjectContext, persistenceController.container.viewContext)
+                    .opacity(showWelcome ? 0 : 1)
+                    .animation(.easeInOut(duration: 0.5), value: showWelcome)
+                    .accessibilityHidden(showWelcome)
                 if showWelcome {
                     WelcomeView(onEnter: enterMain)
-                        .transition(.opacity)
-                } else {
-                    HomeView()
-                        .environment(\.managedObjectContext, persistenceController.container.viewContext)
-                        .transition(.opacity)
                 }
             }
         }
