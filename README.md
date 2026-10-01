@@ -257,6 +257,47 @@ PluckBuddy/
 
 ---
 
+## 2026-10-01 改动
+
+### 一、手部骨架从 6 点简化改为 21 点完整
+
+之前 `HandPoseExtractor` 拿到 Vision 全部 21 个关键点,但 `HandPoseAnalyzer` 只挑了 5 个指尖 + 1 个手腕塞进 `HandPoseData`,UI 也只画 6 个圆点。和 README 宣传的"Vision 追踪手部 21 个关键点"对不上。
+
+修改后:
+- `HandPoseData` 新增 `keypoints: [HandKeypoint]` 字段,保留全部 21 点
+- `drawSimplifiedHandSkeleton` → `drawFullHandSkeleton`:
+  - 5 指尖:彩色大圆 (pink / green / orange / yellow / purple),radius 10
+  - 手腕:蓝色大圆,radius 8
+  - 15 个中间关节 (CMC / MP / IP / MCP / PIP / DIP):白色半透小圆,radius 4
+  - 5 条指骨连线:每指 4 个关节串成一根线(thumbCMC→thumbMP→thumbIP→thumbTip 等)
+  - 5 条手掌连线:wrist → 各指根 (thumbCMC / indexMCP / middleMCP / ringMCP / littleMCP)
+
+涉及文件:
+- `PluckBuddy/TechniqueCoachViewModel.swift`
+
+### 二、"手指角度" 改为 "虎口角度"
+
+之前的"手指角度"评分项用 5 指 `atan2` 返回弧度,作为角度特征拼进 `HandMotionFeatures`,但**这个指标对手型判断无意义**——5 指都在 180° 附近散开,at atan2 永远只反映指间水平散度,无法识别手型是否正确,且 `fingerAngles` 是个 `[Double]` 数组,跟其它标量评分项不匹配,evaluator 里硬塞到 `fingerAngle` 这一栏也是凑数。
+
+改为更有手型诊断意义的**虎口角度**:
+
+- `HandMotionFeatures.fingerAngles: [Double]` → `tigerMouthAngle: Double`(单位:度)
+- 顶点:`wrist`(手腕);边1:`wrist → thumbTip`;边2:`wrist → indexTip`
+- 夹角 = 拇指与食指在手腕处的张开角度,反映虎口的打开程度
+- 评分规则:
+  - 30°-50°:100 分,文案"虎口自然张开"
+  - 10°-30° 或 50°-70°:线性衰减到 40 分
+  - <10° 或 >70°:0-40 分,文案提示"拇指与食指靠太近"或"虎口撑得太大"
+- `EvaluationAspect.Category.fingerAngle = "手指角度"` → `.tigerMouth = "虎口角度"`
+- `TechniqueCoachView` 的标准评分项同步替换
+
+涉及文件:
+- `PluckBuddy/TechniqueCoachViewModel.swift`(`HandMotionFeatures` 结构、`EvaluationAspect.Category` 枚举、`calculateFingerAngles` → `calculateTigerMouthAngle`)
+- `PluckBuddy/TechniqueEvaluators.swift`(评估函数 `evaluateFingerAngles` → `evaluateTigerMouthAngle`、提示文案)
+- `PluckBuddy/TechniqueCoachView.swift`(标准评分项 `standardCategories`)
+
+---
+
 ## License
 
 参赛作品源码,仅供评审与学习使用。
