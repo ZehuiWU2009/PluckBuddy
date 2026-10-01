@@ -247,80 +247,108 @@ class TechniqueCoachViewModel: ObservableObject {
         let width = CVPixelBufferGetWidth(pixelBuffer)
         let height = CVPixelBufferGetHeight(pixelBuffer)
         let imageSize = CGSize(width: width, height: height)
-        
-        // 生成简化的手部可视化（只绘制手指尖端和手腕）
-        skeletonOverlayImage = drawSimplifiedHandSkeleton(
+
+        // 完整手部骨架：21 个关键点 + 5 条指骨 + 手掌
+        skeletonOverlayImage = drawFullHandSkeleton(
             pose: pose,
             imageSize: imageSize
         )
     }
-    
-    /// 绘制简化的手部骨骼（只显示手指尖端和手腕）
-    private func drawSimplifiedHandSkeleton(pose: HandPoseData, imageSize: CGSize) -> UIImage? {
+
+    /// 绘制完整手部骨架（21 个关键点 + 指骨连线 + 手掌连线）
+    /// - 5 指尖：彩色大圆（与旧版一致）
+    /// - 手腕：蓝色大圆
+    /// - 15 个中间关节（CMC/MP/IP/MCP/PIP/DIP）：白色小圆
+    /// - 5 条指骨连线（CMC/MCP → MP/PIP → IP/DIP → Tip）
+    /// - 手掌 5 条连线（wrist → 各指 MCP/CMC）
+    private func drawFullHandSkeleton(pose: HandPoseData, imageSize: CGSize) -> UIImage? {
         UIGraphicsBeginImageContextWithOptions(imageSize, false, 0)
         guard let context = UIGraphicsGetCurrentContext() else {
             return nil
         }
-        
-        // 设置绘图属性
+
         context.setStrokeColor(UIColor.systemPink.cgColor)
-        context.setLineWidth(3.0)
+        context.setLineWidth(2.5)
         context.setLineCap(.round)
         context.setLineJoin(.round)
-        
-        // 收集所有手指尖端位置
-        var fingerTips: [CGPoint] = []
-        if let thumbTip = pose.thumbTip {
-            fingerTips.append(thumbTip)
+
+        // 在 pose.keypoints 里按名字查坐标（取 21 点全集中的任意点）
+        func findPoint(_ name: String) -> CGPoint? {
+            pose.keypoints.first(where: { $0.name == name })?.location
         }
-        if let indexTip = pose.indexTip {
-            fingerTips.append(indexTip)
-        }
-        if let middleTip = pose.middleTip {
-            fingerTips.append(middleTip)
-        }
-        if let ringTip = pose.ringTip {
-            fingerTips.append(ringTip)
-        }
-        if let littleTip = pose.littleTip {
-            fingerTips.append(littleTip)
-        }
-        
-        // 如果有手腕位置，从手腕到各个手指尖端绘制线条
-        if let wrist = pose.wrist {
-            for fingerTip in fingerTips {
-                let wristPoint = convertVisionPointToUIKit(wrist, imageSize: imageSize)
-                let tipPoint = convertVisionPointToUIKit(fingerTip, imageSize: imageSize)
-                
-                context.move(to: wristPoint)
-                context.addLine(to: tipPoint)
+
+        // 1) 5 条指骨连线（每个手指 4 个关节连成一根）
+        let fingerBones: [(String, String, String, String)] = [
+            ("thumbCMC",   "thumbMP",   "thumbIP",   "thumbTip"),     // 拇指
+            ("indexMCP",   "indexPIP",  "indexDIP",  "indexTip"),     // 食指
+            ("middleMCP",  "middlePIP", "middleDIP", "middleTip"),    // 中指
+            ("ringMCP",    "ringPIP",   "ringDIP",   "ringTip"),      // 无名指
+            ("littleMCP",  "littlePIP", "littleDIP", "littleTip"),    // 小指
+        ]
+        for (a, b, c, d) in fingerBones {
+            let raw = [findPoint(a), findPoint(b), findPoint(c), findPoint(d)]
+            var lastUI: CGPoint?
+            for p in raw {
+                guard let p = p else { continue }
+                let ui = convertVisionPointToUIKit(p, imageSize: imageSize)
+                if let last = lastUI {
+                    context.move(to: last)
+                    context.addLine(to: ui)
+                }
+                lastUI = ui
             }
-            context.strokePath()
-            
-            // 绘制手腕点
-            drawCircle(at: wrist, context: context, imageSize: imageSize, color: .systemBlue, radius: 8)
         }
-        
-        // 绘制手指尖端
-        if let thumbTip = pose.thumbTip {
-            drawCircle(at: thumbTip, context: context, imageSize: imageSize, color: .systemPink, radius: 10)
+
+        // 2) 手掌：手腕 → 各指 MCP/CMC 的连线
+        if let wristRaw = findPoint("wrist") {
+            let wristUI = convertVisionPointToUIKit(wristRaw, imageSize: imageSize)
+            let palmRoots = ["thumbCMC", "indexMCP", "middleMCP", "ringMCP", "littleMCP"]
+            for name in palmRoots {
+                if let p = findPoint(name) {
+                    let ui = convertVisionPointToUIKit(p, imageSize: imageSize)
+                    context.move(to: wristUI)
+                    context.addLine(to: ui)
+                }
+            }
         }
-        if let indexTip = pose.indexTip {
-            drawCircle(at: indexTip, context: context, imageSize: imageSize, color: .systemGreen, radius: 10)
+        context.strokePath()
+
+        // 3) 5 指尖彩色大圆（与旧版配色一致）
+        let tipStyles: [(String, UIColor, CGFloat)] = [
+            ("thumbTip",  .systemPink,   10),
+            ("indexTip",  .systemGreen,  10),
+            ("middleTip", .systemOrange, 10),
+            ("ringTip",   .systemYellow, 10),
+            ("littleTip", .systemPurple, 10),
+        ]
+        for (name, color, r) in tipStyles {
+            if let p = findPoint(name) {
+                drawCircle(at: p, context: context, imageSize: imageSize, color: color, radius: r)
+            }
         }
-        if let middleTip = pose.middleTip {
-            drawCircle(at: middleTip, context: context, imageSize: imageSize, color: .systemOrange, radius: 10)
+
+        // 4) 手腕蓝色圆
+        if let wristRaw = findPoint("wrist") {
+            drawCircle(at: wristRaw, context: context, imageSize: imageSize, color: .systemBlue, radius: 8)
         }
-        if let ringTip = pose.ringTip {
-            drawCircle(at: ringTip, context: context, imageSize: imageSize, color: .systemYellow, radius: 10)
+
+        // 5) 15 个中间关节白色小圆（CMC / MP / IP / MCP / PIP / DIP）
+        let jointNames = [
+            "thumbCMC",  "thumbMP",  "thumbIP",
+            "indexMCP",  "indexPIP", "indexDIP",
+            "middleMCP", "middlePIP","middleDIP",
+            "ringMCP",   "ringPIP",  "ringDIP",
+            "littleMCP", "littlePIP","littleDIP",
+        ]
+        let jointColor = UIColor.white.withAlphaComponent(0.85)
+        for name in jointNames {
+            if let p = findPoint(name) {
+                drawCircle(at: p, context: context, imageSize: imageSize, color: jointColor, radius: 4)
+            }
         }
-        if let littleTip = pose.littleTip {
-            drawCircle(at: littleTip, context: context, imageSize: imageSize, color: .systemPurple, radius: 10)
-        }
-        
+
         let image = UIGraphicsGetImageFromCurrentImageContext()
         UIGraphicsEndImageContext()
-        
         return image
     }
     
@@ -466,9 +494,9 @@ class TechniqueCoachViewModel: ObservableObject {
                             description: "手型自然"
                         ),
                         EvaluationAspect(
-                            category: .fingerAngle,
+                            category: .tigerMouth,
                             score: 80,
-                            description: "角度良好"
+                            description: "虎口自然"
                         ),
                         EvaluationAspect(
                             category: .rhythm,
@@ -595,6 +623,9 @@ struct HandPoseData {
     let ringTip: CGPoint?
     let littleTip: CGPoint?
     let wrist: CGPoint?
+    /// Vision 框架检测到的全部 21 个关键点（含中间关节）。
+    /// 用于在画面上画出完整手指骨架，而不仅限指尖 + 手腕。
+    let keypoints: [HandKeypoint]
     let confidence: Float
 }
 
@@ -610,7 +641,7 @@ struct HandMotionFeatures {
     var wristVelocity: CGVector
     
     // 角度特征
-    var fingerAngles: [Double]
+    var tigerMouthAngle: Double   // 虎口角度（度）：手腕处拇指方向与食指方向的夹角
     var wristAngle: Double
     
     // 节奏特征
@@ -629,7 +660,7 @@ struct PostureEvaluation {
 struct EvaluationAspect {
     enum Category: String {
         case handShape = "手型"
-        case fingerAngle = "手指角度"
+        case tigerMouth = "虎口角度"
         case wristPosition = "手腕位置"
         case rhythm = "节奏稳定性"
         case relaxation = "放松程度"
@@ -683,6 +714,7 @@ class HandPoseAnalyzer {
             ringTip: ringTip,
             littleTip: littleTip,
             wrist: wrist,
+            keypoints: keypoints,
             confidence: avgConfidence
         )
     }
@@ -716,19 +748,19 @@ class MotionFeatureExtractor {
         let wristVel = calculateWristVelocity()
         
         // 4. 计算角度特征
-        let angles = calculateFingerAngles(handPose: handPose)
+        let tigerAngle = calculateTigerMouthAngle(handPose: handPose)
         let wristAngle = calculateWristAngle(handPose: handPose)
-        
+
         // 5. 计算节奏特征
         let frequency = calculateMovementFrequency()
         let pattern = detectSequencePattern()
-        
+
         return HandMotionFeatures(
             fingerTipPositions: fingerPositions,
             wristPosition: wristPos,
             fingerVelocities: velocities,
             wristVelocity: wristVel,
-            fingerAngles: angles,
+            tigerMouthAngle: tigerAngle,
             wristAngle: wristAngle,
             movementFrequency: frequency,
             sequencePattern: pattern
@@ -786,26 +818,32 @@ class MotionFeatureExtractor {
     
     // MARK: - 角度计算
     
-    private func calculateFingerAngles(handPose: HandPoseData) -> [Double] {
-        // 计算每个手指相对于手腕的角度
-        guard let wrist = handPose.wrist else {
-            return Array(repeating: 0, count: 5)
+    private func calculateTigerMouthAngle(handPose: HandPoseData) -> Double {
+        // 虎口角度：手腕处，拇指方向 vs 食指方向的夹角（度数）
+        // 三个端点：wrist（参考点）、thumbTip（拇指端）、indexTip（食指端）
+        // 用拇指 + 食指 + 手腕关节连线形成的夹角，反映虎口的打开程度
+        guard let wrist = handPose.wrist,
+              let thumbTip = handPose.thumbTip,
+              let indexTip = handPose.indexTip else {
+            return 0
         }
-        
-        let fingers = [
-            handPose.thumbTip,
-            handPose.indexTip,
-            handPose.middleTip,
-            handPose.ringTip,
-            handPose.littleTip
-        ]
-        
-        return fingers.map { fingerTip in
-            guard let tip = fingerTip else { return 0 }
-            let dx = tip.x - wrist.x
-            let dy = tip.y - wrist.y
-            return atan2(Double(dy), Double(dx))
-        }
+
+        // 两条向量：wrist -> thumbTip, wrist -> indexTip
+        let v1x = Double(thumbTip.x - wrist.x)
+        let v1y = Double(thumbTip.y - wrist.y)
+        let v2x = Double(indexTip.x - wrist.x)
+        let v2y = Double(indexTip.y - wrist.y)
+
+        let len1 = sqrt(v1x * v1x + v1y * v1y)
+        let len2 = sqrt(v2x * v2x + v2y * v2y)
+
+        // 任一向量长度过短（识别失败/夹在同一处）则返回 0
+        guard len1 > 0.001, len2 > 0.001 else { return 0 }
+
+        let dot = v1x * v2x + v1y * v2y
+        let cosTheta = dot / (len1 * len2)
+        let clamped = max(-1.0, min(1.0, cosTheta))
+        return acos(clamped) * 180.0 / .pi
     }
     
     private func calculateWristAngle(handPose: HandPoseData) -> Double {
