@@ -34,7 +34,7 @@ class RhythmDetector {
     var onPluckDetected: ((PluckEvent) -> Void)?
     
     // MARK: - Initialization
-    init(sampleRate: Double = 44100.0) {
+    init(sampleRate: Double = 48000.0) {
         self.sampleRate = sampleRate
         print("🎧 RhythmDetector 初始化（抗噪音版）")
         print("   - 峰值阈值: \(amplitudeThreshold)")

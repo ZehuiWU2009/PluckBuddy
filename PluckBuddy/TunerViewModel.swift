@@ -74,7 +74,8 @@ class TunerViewModel: ObservableObject {
     
     // MARK: - Lifecycle
     func startListening() {
-        Task {
+        Task { [weak self] in
+            guard let self = self else { return }
             // 请求麦克风权限
             audioManager = AudioManager.shared
             guard let manager = audioManager else { return }
@@ -86,7 +87,7 @@ class TunerViewModel: ObservableObject {
             }
             
             // 初始化音高检测器
-            pitchDetector = PitchDetector(sampleRate: 44100.0, bufferSize: 4096)
+            pitchDetector = PitchDetector(sampleRate: 48000.0, bufferSize: 4096)
             
             // ✅ 初始化专业琵琶声检测器
             dspExtractor = DSPFeatureExtractor(fftSize: 4096)

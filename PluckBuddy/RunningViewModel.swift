@@ -91,7 +91,8 @@ class RunningViewModel: ObservableObject {
     
     // MARK: - Lifecycle
     func startPractice() {
-        Task {
+        Task { [weak self] in
+            guard let self = self else { return }
             print("🎵 开始练习...")
             
             // 请求麦克风权限
@@ -111,9 +112,9 @@ class RunningViewModel: ObservableObject {
             print("✅ 麦克风权限已授予")
             
             // 初始化节奏检测器
-            rhythmDetector = RhythmDetector(sampleRate: 44100.0)
+            rhythmDetector = RhythmDetector(sampleRate: 48000.0)
             rhythmDetector?.onPluckDetected = { [weak self] event in
-                Task { @MainActor in
+                Task { @MainActor [weak self] in
                     self?.handlePluckEvent(event)
                 }
             }
@@ -361,8 +362,8 @@ class RunningViewModel: ObservableObject {
     // MARK: - Timer Management
     private func startDurationTimer() {
         durationTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
-            guard let self = self, let start = self.startTime else { return }
-            Task { @MainActor in
+            Task { @MainActor [weak self] in
+                guard let self = self, let start = self.startTime else { return }
                 self.sessionDuration = Date().timeIntervalSince(start)
                 
                 // 检查是否到达目标时长

@@ -31,7 +31,7 @@ class PitchDetector {
     private let historySize = 5 // 保存最近 5 次检测结果
     
     // MARK: - Initialization
-    init(sampleRate: Double = 44100.0, bufferSize: Int = 4096) {
+    init(sampleRate: Double = 48000.0, bufferSize: Int = 4096) {
         self.sampleRate = sampleRate
         self.bufferSize = bufferSize
         

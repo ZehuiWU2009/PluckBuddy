@@ -18,7 +18,7 @@
 PluckBuddy 不只看视频也不只看音频，而是把 **Vision 手部关键点 + FFT 频谱 + CoreML 分类器** 三路信号融合，判定弹挑 / 轮指 / 扫弦 / 长音四类指法。
 
 - **音频侧**：Accelerate 框架做 4096 点 FFT，实时测算音高与节奏；同时把 48 kHz 硬件缓冲线性插值降采样到 16 kHz，喂给 CoreML 分类器做"是不是琵琶"的判门
-- **视频侧**：Vision 追踪手部 21 个关键点，经卡尔曼滤波平滑后计算指尖角度、手腕高度，作为技法判定的几何特征
+- **视频侧**：Vision 追踪手部 21 个关键点，经卡尔曼滤波平滑后计算虎口角度、手腕高度，作为技法判定的几何特征
 - **融合策略**：音频判别"是不是琵琶声"（排除人声 / 环境噪音）；视频判别"手型对不对"；两个都过才进入技法分类，避免单一模态误判
 
 ### 贡献 2 · 端侧自训练 CoreML 琵琶声分类器
@@ -39,7 +39,7 @@ PluckBuddy 不只看视频也不只看音频，而是把 **Vision 手部关键�
 ### 贡献 3 · 4096 点 FFT + 卡尔曼滤波的实时算法
 
 - **FFT 频谱分析**：`DSPFeatureExtractor.swift` 用 `vDSP_fft_zrip`（Accelerate 加速）做 4096 点 FFT，计算 RMS、谐波比、频谱质心、过零率等指标，作为音高检测和分类器输入特征
-- **卡尔曼滤波平滑**：`HandPoseExtractor` 拿到的 21 个关键点每帧都有抖动，直接用会引入噪声；经卡尔曼滤波平滑后，再算指尖角度、手腕高度，能稳定输出指尖偏转度数
+- **卡尔曼滤波平滑**：`HandPoseExtractor` 拿到的 21 个关键点每帧都有抖动，直接用会引入噪声；经卡尔曼滤波平滑后，再算虎口角度、手腕高度，能稳定输出虎口张开度数
 - **并行处理**：麦克风 4096 帧缓冲和摄像头帧在两条独立线程上采集，互不阻塞；CoreML 推理在 `inferenceQueue` 串行队列上跑，不抢音频主线程
 
 ### 贡献 4 · 统一音频管线 + 模型门控架构
@@ -155,7 +155,7 @@ flowchart TB
 - **平台**:iOS 17.6+,arm64 真机(摄像头 / 麦克风功能必需真机)
 - **CoreML**:`PipaSoundClassifier`(四分类 琵琶 / 其它乐器 / 人声 / 背景噪声),`audioSamples` 输入 15600 帧 @ 16 kHz,端侧推理无网络依赖
 - **AVFoundation**:`AVAudioEngine` 麦克风采集,自定义 `AudioManager` 4096 帧 tap + 软件 48→16 kHz 线性插值降采样
-- **Vision**:左手/右手骨架提取(HandPoseExtractor),关节角度推算指型
+- **Vision**:左手/右手 21 点骨架提取(HandPoseExtractor),虎口角度与手腕高度推算手型
 - **Lottie**:扫弦水波与跑道角色动画
 - **CoreData**:练习记录 / 排行榜 / 成就本地持久化
 
@@ -295,6 +295,56 @@ PluckBuddy/
 - `PluckBuddy/TechniqueCoachViewModel.swift`(`HandMotionFeatures` 结构、`EvaluationAspect.Category` 枚举、`calculateFingerAngles` → `calculateTigerMouthAngle`)
 - `PluckBuddy/TechniqueEvaluators.swift`(评估函数 `evaluateFingerAngles` → `evaluateTigerMouthAngle`、提示文案)
 - `PluckBuddy/TechniqueCoachView.swift`(标准评分项 `standardCategories`)
+
+### 三、采样率统一为 48 kHz
+
+`AudioManager` 里 `setPreferredSampleRate(48000.0)`,真机实测输入格式就是 48 kHz,`DSPFeatureExtractor` 也是从 buffer 读实际采样率(48 kHz)。但文档与部分检测器仍写着 44.1 kHz,两者不一致,而且 `PitchDetector` / `RhythmDetector` / `SweepDetector` / `RollDetector` 硬编码 44100,会让音高偏低约 1.5 个半音、节拍偏慢约 8.8%。
+
+- 架构图(中/英 PPTX 与 README 渲染图):`44.1 kHz` → `48 kHz`
+- `PitchDetector` / `RhythmDetector` / `SweepDetector` / `RollDetector` 默认采样率与四个 ViewModel 的构造参数:`44100.0` → `48000.0`
+- `DSPFeatureExtractor` 的默认值同步改为 48000(它本来就会在首帧按 buffer 实际采样率覆盖)
+- 单元测试 `PitchDetectorTests` 保持 44100:它自己合成 44100 的正弦波再喂给同名参数的 detector,自洽,不需要改
+
+涉及文件:
+- `PluckBuddy/PitchDetector.swift`、`PluckBuddy/RhythmDetector.swift`、`PluckBuddy/SweepDetector.swift`、`PluckBuddy/RollDetector.swift`、`PluckBuddy/DSPFeatureExtractor.swift`
+- `PluckBuddy/TunerViewModel.swift`、`PluckBuddy/FlowerViewModel.swift`、`PluckBuddy/WaveViewModel.swift`、`PluckBuddy/RunningViewModel.swift`
+
+> 这一项只改常量,不换算法:`xcrun swiftc -typecheck` 对五个检测器文件全部通过(仅存既有的 #NoUsage warning)。
+
+### 四、指尖角度 → 虎口角度(文档口径)
+
+贡献 1、贡献 3、技术栈三处正文里提到的"指尖角度"是旧口径,代码里实际算的是虎口角度(拇指与食指在手腕处的张开度),改成"虎口角度"避免评审对照代码时发现对不上。
+
+---
+
+## 2026-10-02 改动
+
+真机构建出现 14 条警告,其中 13 条是代码问题(另 1 条是 Xcode 工具链的 AppIntents 元数据提示,与代码无关),已全部消除,中英文两个工程同步修改。
+
+### 一、闭包捕获语义不一致(8 处)
+
+`Task {}` 会隐式强捕获 `self`,而嵌套在其中的回调闭包又写了 `[weak self]`,编译器判定内外捕获语义冲突(`#ImplicitStrongCapture`)。
+
+- 启动流程的 `Task {}` 改为 `Task { [weak self] in`,首行补 `guard let self = self else { return }`:页面已销毁时直接退出,不再把启动流程跑完
+- 回调里的 `Task { @MainActor in }` 改为 `Task { @MainActor [weak self] in`
+
+### 二、Sendable 闭包读取主线程属性(3 处)
+
+计时器回调里先读 `startTime`(被 `@MainActor` 隔离的属性)再开 Task,跨隔离域访问被警告。改为把取值放进 `Task { @MainActor [weak self] in }` 内部,在主线程上读取,行为不变。
+
+### 三、计算后未使用的变量(2 处)
+
+`SweepDetector.inferDirection()` 里的 `downCount` / `upCount` 统计了最近五次的方向分布,但没有参与判定(实际判定是"与上一次方向交替"),删掉这两行并改正注释。同文件里同名的另一对变量是真在用的统计字段,保留。
+
+涉及文件:
+- `PluckBuddy/FlowerViewModel.swift`、`PluckBuddy/WaveViewModel.swift`、`PluckBuddy/TunerViewModel.swift`、`PluckBuddy/RunningViewModel.swift`、`PluckBuddy/TechniqueCoachViewModel.swift`、`PluckBuddy/SweepDetector.swift`
+
+> 验证方式:全量 `xcrun swiftc -typecheck`(自动剥离 `#Preview` 块),13 条目标警告全部消失,无新增告警与错误。
+> `CameraManager.swift` 在命令行并发检查下会报 21 条 `AVCaptureSession` 跨线程告警,但 Xcode 实际构建从不报;这是苹果官方 AVCam 示例的同款写法(`startRunning` / `stopRunning` 本就必须放后台队列),加 `nonisolated` 会直接变成 error,因此保留原样。
+
+### 四、国际版 App 图标换为英文版
+
+国际版此前仍在使用中文版应用图标(桌面小图标上还是中文字),已替换为英文版设计 `logo-English.png`,默认、深色、着色三种外观同步更新。
 
 ---
 
