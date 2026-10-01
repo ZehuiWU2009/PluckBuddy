@@ -353,6 +353,13 @@ PluckBuddy/
 - 工程名、target 名、Bundle ID(`com.zehuiwu.pluckbuddy`)、代码里的模块标识与文件路径全部保持不变,不影响编译与真机调试
 - 国际版仍叫 PluckBuddy,两个 App 可以共存安装
 
+### 六、欢迎页 Logo 换为中文版
+
+中文工程此前只有一份英文版 logo 资源(`LogoEnglish`),欢迎页显示的图画是英文标语。现新增 `Assets.xcassets/LogoChinese.imageset`(取自 `logo-Chinese.png`),`WelcomeView.swift` 的引用由 `LogoEnglish` 改为 `LogoChinese`。
+
+- 国际版不受影响,继续使用 `LogoEnglish`
+- 工程使用 Xcode 16 的同步文件夹(`PBXFileSystemSynchronizedRootGroup`),新增资源集自动收录,`project.pbxproj` 无需改动
+
 ---
 
 ## License
