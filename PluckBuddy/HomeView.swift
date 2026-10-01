@@ -129,7 +129,7 @@ struct HomeView: View {
                 )
                 .frame(width: 4, height: 26)
             
-            Text("PluckBuddy")
+            Text("弹拨搭子")
                 .font(.system(size: 26, weight: .bold))
                 .foregroundStyle(.primary)
             
