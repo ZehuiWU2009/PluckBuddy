@@ -40,7 +40,7 @@ struct WelcomeView: View {
                 Spacer(minLength: 0)
                 
                 // 品牌标识
-                Image("LogoEnglish")
+                Image("LogoChinese")
                     .resizable()
                     .scaledToFit()
                     .frame(maxWidth: 320)
