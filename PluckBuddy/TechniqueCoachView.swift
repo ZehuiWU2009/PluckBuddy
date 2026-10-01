@@ -276,7 +276,7 @@ struct TechniqueCoachView: View {
         // 定义通用的4个固定维度
         let standardCategories: [EvaluationAspect.Category] = [
             .handShape,      // 手型
-            .fingerAngle,    // 手指角度
+            .tigerMouth,     // 虎口角度
             .rhythm,         // 节奏稳定性
             .wristPosition   // 手腕位置
         ]
