@@ -29,7 +29,7 @@ class DSPFeatureExtractor {
     // MARK: - Initialization
     init(fftSize: Int = 4096) {
         self.fftSize = fftSize
-        self.sampleRate = 44100.0 // ✅ 默认值，会在首次处理时更新
+        self.sampleRate = 48000.0 // ✅ 默认值，会在首次处理时更新
         
         guard let setup = vDSP_DFT_zrop_CreateSetup(
             nil,

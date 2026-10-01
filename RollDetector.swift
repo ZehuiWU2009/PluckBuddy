@@ -29,7 +29,7 @@ class RollDetector {
     var onRollSequenceComplete: ((RollSequence) -> Void)?
     
     // MARK: - Initialization
-    init(sampleRate: Double = 44100.0) {
+    init(sampleRate: Double = 48000.0) {
         self.sampleRate = sampleRate
     }
     

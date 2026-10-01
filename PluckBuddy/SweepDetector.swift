@@ -26,7 +26,7 @@ class SweepDetector {
     var onSweepDetected: ((SweepEvent) -> Void)?
     
     // MARK: - Initialization
-    init(sampleRate: Double = 44100.0) {
+    init(sampleRate: Double = 48000.0) {
         self.sampleRate = sampleRate
     }
     
@@ -110,10 +110,8 @@ class SweepDetector {
             return .down // 默认向下
         }
         
-        // 统计最近的方向分布
+        // 取最近若干次记录用于方向判定
         let recentDirections = sweepHistory.suffix(5)
-        let downCount = recentDirections.filter { $0.direction == .down }.count
-        let upCount = recentDirections.filter { $0.direction == .up }.count
         
         // 倾向于交替方向
         let lastDirection = recentDirections.last?.direction ?? .down

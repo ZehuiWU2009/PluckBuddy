@@ -454,8 +454,8 @@ class TechniqueCoachViewModel: ObservableObject {
     
     private func startDurationTimer() {
         durationTimer = Timer.scheduledTimer(withTimeInterval: 0.1, repeats: true) { [weak self] _ in
-            guard let self = self, let start = self.startTime else { return }
-            Task { @MainActor in
+            Task { @MainActor [weak self] in
+                guard let self = self, let start = self.startTime else { return }
                 self.sessionDuration = Date().timeIntervalSince(start)
             }
         }
