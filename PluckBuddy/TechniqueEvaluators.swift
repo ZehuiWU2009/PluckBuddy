@@ -31,12 +31,12 @@ class RollPostureEvaluator {
             description: wristScore >= 80 ? "手腕稳定" : "手腕晃动过大"
         ))
         
-        // 3. 评估手指角度
-        let angleScore = evaluateFingerAngles(angles: features.fingerAngles)
+        // 3. 评估虎口角度（拇指与食指之间的张开程度）
+        let tigerScore = evaluateTigerMouthAngle(degrees: features.tigerMouthAngle)
         aspects.append(EvaluationAspect(
-            category: .fingerAngle,
-            score: angleScore,
-            description: angleScore >= 80 ? "手指弧度自然" : "注意保持手指弯曲"
+            category: .tigerMouth,
+            score: tigerScore,
+            description: tigerScore >= 80 ? "虎口自然张开" : "调整虎口打开程度"
         ))
         
         // 4. 评估运动流畅度
@@ -58,8 +58,8 @@ class RollPostureEvaluator {
         if wristScore < 80 {
             suggestions.append("放松手腕，保持稳定姿势")
         }
-        if angleScore < 80 {
-            suggestions.append("注意手指自然弯曲，形成弧度")
+        if tigerScore < 80 {
+            suggestions.append("调整虎口打开程度，让拇指与食指自然张开")
         }
         if smoothScore < 80 {
             suggestions.append("放松手部肌肉，让动作更流畅")
@@ -91,12 +91,20 @@ class RollPostureEvaluator {
         return min(100, 50 + ratio * 50)
     }
     
-    private func evaluateFingerAngles(angles: [Double]) -> Double {
-        // 理想的手指角度应该在 30-60 度之间
-        let idealRange = (0.5...1.0) // 弧度
-        let validAngles = angles.filter { idealRange.contains(abs($0)) }.count
-        let ratio = Double(validAngles) / Double(max(1, angles.count))
-        return ratio * 100
+    private func evaluateTigerMouthAngle(degrees: Double) -> Double {
+        // 虎口打开程度的连续评分（度数）
+        // 理想虎口：拇指与食指之间约 30°-50° 的夹角（手腕为参考点）
+        let ideal = 40.0
+        let diff = abs(degrees - ideal)
+
+        if degrees < 1 {
+            // 数据缺失（识别失败/手指未检出）—— 不参与评分
+            return 70
+        }
+        if diff < 10 { return 100 }   // 30-50° 完美
+        if diff < 20 { return 85 }    // 20-60° 可接受
+        if diff < 30 { return 70 }    // 10-70° 偏离
+        return 50                     // 极端
     }
     
     private func evaluateMovementSmoothness(velocities: [CGVector]) -> Double {
@@ -199,7 +207,7 @@ class PluckPostureEvaluator {
         let maxSpeed = speeds.max() ?? 0
         let strengthScore = min(100, maxSpeed * 150)
         aspects.append(EvaluationAspect(
-            category: .fingerAngle,
+            category: .handShape,
             score: strengthScore,
             description: strengthScore >= 70 ? "拨弦力度适中" : strengthScore >= 50 ? "力度偏弱" : "力度过弱"
         ))
