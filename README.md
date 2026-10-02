@@ -77,8 +77,6 @@ iOS 上多个模块都想用麦克风，但 AVAudioEngine 的 tap 只能被一�
 
 采用端侧全离线五层架构,从麦克风 / 摄像头原始数据到 UI 反馈全部在 iPhone 上完成,无任何网络依赖。
 
-![弹拨搭子 五层架构](docs/images/architecture.png)
-
 各层的模块映射关系如下。
 
 ```mermaid
