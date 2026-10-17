@@ -6,6 +6,11 @@
 >
 > 开发者:吴泽荟  
 > 学校:武汉康礼高级中学
+>
+> ---
+>
+> **本项目已停止维护,由双语版继承:[PluckBuddy-Bilingual](https://github.com/ZehuiWU2009/PluckBuddy-Bilingual)(中英可切换,PluckBuddy 2.0)。**
+> Superseded by the bilingual edition: [PluckBuddy-Bilingual](https://github.com/ZehuiWU2009/PluckBuddy-Bilingual).
 
 ---
 
